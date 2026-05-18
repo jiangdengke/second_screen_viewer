@@ -5,8 +5,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.0 (9)';
-const httpControlPort = 9095;
+const appVersionLabel = '版本 1.2.1 (10)';
+const httpControlPort = 9999;
 
 void main() {
   runApp(const SecondScreenApp());
@@ -208,7 +208,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         _controlAddress = address;
         _httpServerStatus = '运行中';
       });
-      _addLog('HTTP服务：$address');
+      _addLog('HTTP服务启动成功：$address 监听端口=$httpControlPort');
       server.listen(
         _handleHttpRequest,
         onError: (Object error) {
@@ -256,6 +256,11 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
 
     try {
       final path = request.uri.path.toLowerCase();
+      final remoteAddress =
+          request.connectionInfo?.remoteAddress.address ?? 'unknown';
+      _addLog(
+        'HTTP调用：${request.method} ${request.uri.path} from=$remoteAddress',
+      );
       if (request.method == 'GET' && path == '/api/status') {
         await _sendJson(request.response, _successResponse(_statusPayload()));
         return;
@@ -274,6 +279,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
 
       if (request.method == 'POST' &&
           (path == '/api/hide' || path == '/robot_task/screen_stop')) {
+        _addLog('HTTP停止调用：${request.uri.path}');
         _stopImageSlideshow(clearCache: true);
         await _hideImage();
         await _sendJson(request.response, _successResponse(_statusPayload()));
@@ -327,16 +333,23 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     _stopImageSlideshow(clearCache: true);
     final mediaType =
         _stringValue(payload['mediaType']) ?? _inferMediaType(url);
+    final displayId = _intValue(payload['displayId'] ?? payload['display_id']);
+    final scaleMode = _scaleModeFromPayload(payload);
+    final rotationMode = _rotationModeFromPayload(payload);
+    _addLog(
+      'HTTP视频调用：url=$url display=${displayId ?? '默认副屏'} '
+      'scale=${scaleMode.wireName} rotation=${rotationMode.degrees}',
+    );
     final resolvedUri = mediaType == 'image'
         ? await _resolveImageUriForDisplay(url)
         : url;
-    final displayId = await _showMediaOnDisplay(
+    final shownDisplayId = await _showMediaOnDisplay(
       mediaUri: resolvedUri,
       mediaName: _fileNameFromUrl(url),
       mediaType: mediaType,
-      displayId: _intValue(payload['displayId'] ?? payload['display_id']),
-      scaleMode: _scaleModeFromPayload(payload),
-      rotationMode: _rotationModeFromPayload(payload),
+      displayId: displayId,
+      scaleMode: scaleMode,
+      rotationMode: rotationMode,
       source: 'HTTP视频接口',
     );
 
@@ -344,7 +357,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       request.response,
       _successResponse({
         ..._statusPayload(),
-        'displayId': displayId,
+        'displayId': shownDisplayId,
         'url': url,
       }),
     );
@@ -360,19 +373,27 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     }
 
     final intervalMs = _intValue(payload['time_sleep']) ?? 2000;
-    final displayId = await _startImageSlideshow(
+    final displayId = _intValue(payload['displayId'] ?? payload['display_id']);
+    final scaleMode = _scaleModeFromPayload(payload);
+    final rotationMode = _rotationModeFromPayload(payload);
+    _addLog(
+      'HTTP图片轮播调用：count=${urls.length} interval=${intervalMs}ms '
+      'display=${displayId ?? '默认副屏'} scale=${scaleMode.wireName} '
+      'rotation=${rotationMode.degrees}',
+    );
+    final shownDisplayId = await _startImageSlideshow(
       urls: urls,
       intervalMs: intervalMs,
-      displayId: _intValue(payload['displayId'] ?? payload['display_id']),
-      scaleMode: _scaleModeFromPayload(payload),
-      rotationMode: _rotationModeFromPayload(payload),
+      displayId: displayId,
+      scaleMode: scaleMode,
+      rotationMode: rotationMode,
     );
 
     await _sendJson(
       request.response,
       _successResponse({
         ..._statusPayload(),
-        'displayId': displayId,
+        'displayId': shownDisplayId,
         'time_sleep': intervalMs,
         'url': urls,
       }),
