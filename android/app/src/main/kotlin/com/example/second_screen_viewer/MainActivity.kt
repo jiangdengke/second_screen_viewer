@@ -32,6 +32,8 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.FileInputStream
+import java.io.InputStream
 import kotlin.math.max
 import kotlin.math.min
 
@@ -575,7 +577,7 @@ private class PresentationImageView(
         }
 
         try {
-            context.contentResolver.openInputStream(imageUri)?.use {
+            openImageStream()?.use {
                 BitmapFactory.decodeStream(it, null, bounds)
             }
 
@@ -590,11 +592,19 @@ private class PresentationImageView(
                 inSampleSize = calculateInSampleSize(bounds, requestedWidth, requestedHeight)
             }
 
-            return context.contentResolver.openInputStream(imageUri)?.use {
+            return openImageStream()?.use {
                 BitmapFactory.decodeStream(it, null, options)
             }
         } catch (_: Exception) {
             return null
+        }
+    }
+
+    private fun openImageStream(): InputStream? {
+        return if (imageUri.scheme == "file") {
+            imageUri.path?.let { FileInputStream(it) }
+        } else {
+            context.contentResolver.openInputStream(imageUri)
         }
     }
 
