@@ -1,16 +1,16 @@
 # second_screen_viewer
 
-A new Flutter project.
+RK3588 Android 副屏媒体显示工具，用于在主屏正常操作时，把图片或视频投放到指定副屏。
 
-## Getting Started
+## GitHub Actions 打包
 
-This project is a starting point for a Flutter application.
+普通提交会运行 `flutter analyze` 和 `flutter test`。
 
-A few resources to get you started if this is your first Flutter project:
+创建并推送 `v*` tag 后，会自动编译 release APK，并上传到 GitHub Release：
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+```bash
+git tag v1.1.2
+git push origin v1.1.2
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+也可以在 GitHub Actions 页面手动运行 `Android APK Release` workflow，并填写 release tag。
