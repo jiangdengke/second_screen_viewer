@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.1 (10)';
+const appVersionLabel = '版本 1.2.2 (11)';
 const httpControlPort = 9999;
 
 void main() {
@@ -44,7 +44,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   static const _channel = MethodChannel('second_screen_viewer/display');
 
   final List<DeviceDisplay> _displays = [];
-  final Map<String, String> _remoteImageCache = {};
+  final Map<String, String> _remoteMediaCache = {};
   HttpServer? _httpServer;
   Timer? _imageSlideshowTimer;
   bool _isSlideshowTicking = false;
@@ -76,16 +76,63 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   void dispose() {
     _imageSlideshowTimer?.cancel();
     _httpServer?.close(force: true);
-    _clearRemoteImageCache();
+    _clearRemoteMediaCache();
     super.dispose();
   }
 
   Future<dynamic> _handleNativeMethodCall(MethodCall call) async {
-    _addLog('原生事件：${call.method} ${call.arguments ?? ''}');
-    if (call.method == 'presentationDismissed' && mounted) {
+    switch (call.method) {
+      case 'presentationDismissed':
+        _addLog('原生事件：副屏窗口已关闭');
+        if (mounted) {
+          setState(() {
+            _isShowing = false;
+            _status = '副屏显示已关闭';
+          });
+        }
+        return;
+      case 'presentationEvent':
+        final arguments = call.arguments;
+        if (arguments is! Map) {
+          _addLog('原生事件：presentationEvent 参数异常 ${call.arguments ?? ''}');
+          return;
+        }
+        final event = Map<dynamic, dynamic>.from(arguments);
+        _handlePresentationEvent(event);
+        return;
+      default:
+        _addLog('原生事件：${call.method} ${call.arguments ?? ''}');
+    }
+  }
+
+  void _handlePresentationEvent(Map<dynamic, dynamic> event) {
+    final type = event['type']?.toString() ?? 'unknown';
+    final mediaType = event['mediaType']?.toString();
+    final displayId = event['displayId'];
+    final message = event['message']?.toString();
+    final width = event['width'];
+    final height = event['height'];
+
+    final parts = <String>[
+      if (mediaType != null) mediaType == 'video' ? '视频' : '图片',
+      if (displayId != null) 'display=$displayId',
+      if (width != null && height != null) '${width}x$height',
+      if (message != null && message.isNotEmpty) message,
+    ];
+
+    final text = parts.isEmpty ? type : '$type：${parts.join(' ')}';
+    _addLog('副屏播放：$text');
+
+    if (type == 'videoStarted' && mounted) {
       setState(() {
-        _isShowing = false;
-        _status = '副屏显示已关闭';
+        _isShowing = true;
+        _status = '副屏视频已开始播放';
+      });
+    }
+
+    if (type == 'videoError' && mounted) {
+      setState(() {
+        _status = message == null || message.isEmpty ? '副屏视频播放失败' : message;
       });
     }
   }
@@ -340,9 +387,10 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       'HTTP视频调用：url=$url display=${displayId ?? '默认副屏'} '
       'scale=${scaleMode.wireName} rotation=${rotationMode.degrees}',
     );
-    final resolvedUri = mediaType == 'image'
-        ? await _resolveImageUriForDisplay(url)
-        : url;
+    final resolvedUri = await _resolveRemoteMediaUriForDisplay(
+      url,
+      mediaType: mediaType,
+    );
     final shownDisplayId = await _showMediaOnDisplay(
       mediaUri: resolvedUri,
       mediaName: _fileNameFromUrl(url),
@@ -429,7 +477,10 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       final currentIndex = index % urls.length;
       final sourceUrl = urls[currentIndex];
       index += 1;
-      final displayUri = await _resolveImageUriForDisplay(sourceUrl);
+      final displayUri = await _resolveRemoteMediaUriForDisplay(
+        sourceUrl,
+        mediaType: 'image',
+      );
       return _showMediaOnDisplay(
         mediaUri: displayUri,
         mediaName:
@@ -466,39 +517,52 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     return shownDisplayId;
   }
 
-  Future<String> _resolveImageUriForDisplay(String sourceUrl) async {
+  Future<String> _resolveRemoteMediaUriForDisplay(
+    String sourceUrl, {
+    required String mediaType,
+  }) async {
     final uri = Uri.tryParse(sourceUrl);
     if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
       return sourceUrl;
     }
 
-    final cachedUri = _remoteImageCache[sourceUrl];
+    final cachedUri = _remoteMediaCache[sourceUrl];
     if (cachedUri != null) {
       return cachedUri;
     }
 
     final cacheDir = Directory(
-      '${Directory.systemTemp.path}/second_screen_viewer',
+      '${Directory.systemTemp.path}/second_screen_viewer/media_cache',
     );
     if (!await cacheDir.exists()) {
       await cacheDir.create(recursive: true);
     }
 
     final fileName =
-        '${DateTime.now().millisecondsSinceEpoch}_${_safeFileName(_fileNameFromUrl(sourceUrl))}';
+        '${DateTime.now().millisecondsSinceEpoch}_${_safeMediaFileName(sourceUrl, mediaType)}';
     final file = File('${cacheDir.path}/$fileName');
     final client = HttpClient();
     try {
+      _addLog('媒体下载开始：type=$mediaType $sourceUrl');
       final request = await client.getUrl(uri);
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('下载图片失败：HTTP ${response.statusCode}', uri: uri);
+        throw HttpException('下载媒体失败：HTTP ${response.statusCode}', uri: uri);
       }
       await response.pipe(file.openWrite());
       final fileUri = file.uri.toString();
-      _remoteImageCache[sourceUrl] = fileUri;
-      _addLog('图片缓存：$sourceUrl -> $fileUri');
+      _remoteMediaCache[sourceUrl] = fileUri;
+      _addLog('媒体缓存完成：$sourceUrl -> $fileUri');
       return fileUri;
+    } catch (_) {
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (_) {
+        // Partial cache cleanup is best effort.
+      }
+      rethrow;
     } finally {
       client.close(force: true);
     }
@@ -509,12 +573,12 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     _imageSlideshowTimer = null;
     _isSlideshowTicking = false;
     if (clearCache) {
-      _clearRemoteImageCache();
+      _clearRemoteMediaCache();
     }
   }
 
-  void _clearRemoteImageCache() {
-    for (final fileUri in _remoteImageCache.values) {
+  void _clearRemoteMediaCache() {
+    for (final fileUri in _remoteMediaCache.values) {
       final uri = Uri.tryParse(fileUri);
       if (uri?.scheme == 'file') {
         try {
@@ -524,7 +588,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         }
       }
     }
-    _remoteImageCache.clear();
+    _remoteMediaCache.clear();
   }
 
   Future<void> _pickMedia() async {
@@ -830,6 +894,15 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   String _safeFileName(String value) {
     final sanitized = value.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     return sanitized.isEmpty ? 'image' : sanitized;
+  }
+
+  String _safeMediaFileName(String sourceUrl, String mediaType) {
+    final name = _safeFileName(_fileNameFromUrl(sourceUrl));
+    if (name.contains('.')) {
+      return name;
+    }
+
+    return mediaType == 'video' ? '$name.mp4' : '$name.img';
   }
 
   @override

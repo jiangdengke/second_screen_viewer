@@ -34,6 +34,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.FileInputStream
 import java.io.InputStream
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
@@ -222,8 +223,11 @@ class MainActivity : FlutterActivity() {
             Uri.parse(mediaUriString),
             mediaType,
             scaleMode.toImageScaleMode(),
-            rotationDegrees
-        )
+            rotationDegrees,
+            displayId
+        ) { event ->
+            sendPresentationEvent(event)
+        }
         presentation.setOnDismissListener {
             if (currentPresentation === presentation) {
                 currentPresentation = null
@@ -287,6 +291,14 @@ class MainActivity : FlutterActivity() {
         currentPresentation?.dismiss()
         currentPresentation = null
         result.success(true)
+    }
+
+    private fun sendPresentationEvent(event: Map<String, Any?>) {
+        if (::channel.isInitialized) {
+            runOnUiThread {
+                channel.invokeMethod("presentationEvent", event)
+            }
+        }
     }
 
     private fun persistReadPermission(uri: Uri, flags: Int) {
@@ -370,6 +382,8 @@ private class MediaPresentation(
     private val mediaType: String,
     private val scaleMode: String,
     private val rotationDegrees: Int,
+    private val displayId: Int,
+    private val onEvent: (Map<String, Any?>) -> Unit,
 ) : Presentation(context, display) {
     override fun onCreate(savedInstanceState: Bundle?) {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -398,13 +412,29 @@ private class MediaPresentation(
             setBackgroundColor(Color.BLACK)
             if (mediaType == "video") {
                 addView(
-                    PresentationVideoView(context, mediaUri, scaleMode, rotationDegrees),
+                    PresentationVideoView(
+                        context,
+                        mediaUri,
+                        scaleMode,
+                        rotationDegrees,
+                        displayId,
+                        onEvent
+                    ),
                     FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
             } else {
+                onEvent(
+                    mapOf(
+                        "type" to "imageShown",
+                        "mediaType" to mediaType,
+                        "displayId" to displayId,
+                        "uri" to mediaUri.toString(),
+                        "message" to "图片窗口已显示"
+                    )
+                )
                 addView(
                     PresentationImageView(context, mediaUri, scaleMode, rotationDegrees),
                     FrameLayout.LayoutParams(
@@ -424,6 +454,8 @@ private class PresentationVideoView(
     private val videoUri: Uri,
     private val scaleMode: String,
     rotationDegrees: Int,
+    private val displayId: Int,
+    private val onEvent: (Map<String, Any?>) -> Unit,
 ) : TextureView(context), TextureView.SurfaceTextureListener {
     private val rotationDegrees = rotationDegrees.normalizedRightAngle()
     private var mediaPlayer: MediaPlayer? = null
@@ -437,6 +469,17 @@ private class PresentationVideoView(
 
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
         surface = Surface(surfaceTexture)
+        onEvent(
+            mapOf(
+                "type" to "videoSurfaceReady",
+                "mediaType" to "video",
+                "displayId" to displayId,
+                "width" to width,
+                "height" to height,
+                "uri" to videoUri.toString(),
+                "message" to "视频窗口已创建"
+            )
+        )
         preparePlayer()
     }
 
@@ -445,6 +488,15 @@ private class PresentationVideoView(
     }
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+        onEvent(
+            mapOf(
+                "type" to "videoSurfaceDestroyed",
+                "mediaType" to "video",
+                "displayId" to displayId,
+                "uri" to videoUri.toString(),
+                "message" to "视频窗口已销毁"
+            )
+        )
         releasePlayer()
         return true
     }
@@ -452,6 +504,15 @@ private class PresentationVideoView(
     override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
 
     override fun onDetachedFromWindow() {
+        onEvent(
+            mapOf(
+                "type" to "videoDetached",
+                "mediaType" to "video",
+                "displayId" to displayId,
+                "uri" to videoUri.toString(),
+                "message" to "视频视图已释放"
+            )
+        )
         releasePlayer()
         super.onDetachedFromWindow()
     }
@@ -459,27 +520,98 @@ private class PresentationVideoView(
     private fun preparePlayer() {
         val targetSurface = surface ?: return
         releasePlayer(keepSurface = true)
+        onEvent(
+            mapOf(
+                "type" to "videoPreparing",
+                "mediaType" to "video",
+                "displayId" to displayId,
+                "uri" to videoUri.toString(),
+                "message" to "播放器开始准备"
+            )
+        )
 
         mediaPlayer = MediaPlayer().apply {
-            setDataSource(context, videoUri)
+            setDataSourceForUri(videoUri)
             setSurface(targetSurface)
             isLooping = true
             setOnVideoSizeChangedListener { _, videoW, videoH ->
                 this@PresentationVideoView.videoWidth = videoW
                 this@PresentationVideoView.videoHeight = videoH
+                Log.i(
+                    "SecondScreenViewer",
+                    "Video size changed ${videoW}x$videoH uri=$videoUri"
+                )
+                onEvent(
+                    mapOf(
+                        "type" to "videoSizeChanged",
+                        "mediaType" to "video",
+                        "displayId" to displayId,
+                        "width" to videoW,
+                        "height" to videoH,
+                        "uri" to videoUri.toString()
+                    )
+                )
                 updateTransform()
             }
             setOnPreparedListener {
                 this@PresentationVideoView.videoWidth = it.videoWidth
                 this@PresentationVideoView.videoHeight = it.videoHeight
+                Log.i(
+                    "SecondScreenViewer",
+                    "Video prepared ${it.videoWidth}x${it.videoHeight} uri=$videoUri"
+                )
                 updateTransform()
                 it.start()
+                onEvent(
+                    mapOf(
+                        "type" to "videoStarted",
+                        "mediaType" to "video",
+                        "displayId" to displayId,
+                        "width" to it.videoWidth,
+                        "height" to it.videoHeight,
+                        "uri" to videoUri.toString(),
+                        "message" to "视频已开始播放"
+                    )
+                )
             }
             setOnErrorListener { _, what, extra ->
-                Log.e("SecondScreenViewer", "Video playback error what=$what extra=$extra")
+                Log.e(
+                    "SecondScreenViewer",
+                    "Video playback error what=$what extra=$extra uri=$videoUri"
+                )
+                onEvent(
+                    mapOf(
+                        "type" to "videoError",
+                        "mediaType" to "video",
+                        "displayId" to displayId,
+                        "uri" to videoUri.toString(),
+                        "message" to "视频播放失败 what=$what extra=$extra"
+                    )
+                )
                 true
             }
+            setOnInfoListener { _, what, extra ->
+                Log.i("SecondScreenViewer", "Video playback info what=$what extra=$extra uri=$videoUri")
+                onEvent(
+                    mapOf(
+                        "type" to "videoInfo",
+                        "mediaType" to "video",
+                        "displayId" to displayId,
+                        "uri" to videoUri.toString(),
+                        "message" to "播放器信息 what=$what extra=$extra"
+                    )
+                )
+                false
+            }
             prepareAsync()
+        }
+    }
+
+    private fun MediaPlayer.setDataSourceForUri(uri: Uri) {
+        when (uri.scheme?.lowercase(Locale.US)) {
+            "http", "https" -> setDataSource(uri.toString())
+            "file" -> setDataSource(uri.path ?: uri.toString())
+            else -> setDataSource(context, uri)
         }
     }
 
