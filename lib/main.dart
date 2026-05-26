@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.3 (12)';
+const appVersionLabel = '版本 1.2.4 (13)';
 const httpControlPort = 9999;
 
 void main() {
