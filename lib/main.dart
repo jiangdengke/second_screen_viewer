@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.2 (11)';
+const appVersionLabel = '版本 1.2.3 (12)';
 const httpControlPort = 9999;
 
 void main() {
@@ -150,6 +150,9 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         'getSavedConfig',
       );
 
+      final savedSourceUri = config?['sourceUri'] as String? ??
+          config?['mediaUri'] as String? ??
+          config?['imageUri'] as String?;
       final savedDisplayId = config?['displayId'] as int?;
       final savedScaleMode = ScaleMode.fromWireName(
         config?['scaleMode'] as String?,
@@ -157,10 +160,10 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       final savedRotationMode = RotationMode.fromDegrees(
         config?['rotationDegrees'] as int?,
       );
+      final shouldRestore = config?['isShowing'] == true && savedSourceUri != null;
 
       setState(() {
-        _mediaUri =
-            config?['mediaUri'] as String? ?? config?['imageUri'] as String?;
+        _mediaUri = savedSourceUri;
         _mediaName =
             config?['mediaName'] as String? ?? config?['imageName'] as String?;
         _mediaType = config?['mediaType'] as String? ?? 'image';
@@ -173,6 +176,17 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         'type=$_mediaType '
         'scale=${_scaleMode.wireName} rotation=${_rotationMode.degrees}',
       );
+
+      if (shouldRestore && mounted) {
+        await _restoreLastShownMedia(
+          mediaUri: savedSourceUri,
+          mediaName: _mediaName,
+          mediaType: _mediaType,
+          displayId: _selectedDisplayId,
+          scaleMode: _scaleMode,
+          rotationMode: _rotationMode,
+        );
+      }
     } on PlatformException catch (error) {
       _handlePlatformError('读取设备状态失败', error);
     } finally {
@@ -398,6 +412,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       displayId: displayId,
       scaleMode: scaleMode,
       rotationMode: rotationMode,
+      sourceUri: url,
       source: 'HTTP视频接口',
     );
 
@@ -489,6 +504,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         displayId: displayId,
         scaleMode: scaleMode,
         rotationMode: rotationMode,
+        sourceUri: sourceUrl,
         source: 'HTTP图片轮播',
       );
     }
@@ -636,7 +652,33 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         displayId: _selectedDisplayId,
         scaleMode: _scaleMode,
         rotationMode: _rotationMode,
+        sourceUri: _mediaUri,
         source: '主界面',
+      );
+    } catch (_) {
+      // Error state has already been shown and logged.
+    }
+  }
+
+  Future<void> _restoreLastShownMedia({
+    required String mediaUri,
+    required String? mediaName,
+    required String mediaType,
+    required int? displayId,
+    required ScaleMode scaleMode,
+    required RotationMode rotationMode,
+  }) async {
+    _addLog('启动：自动恢复上次显示内容');
+    try {
+      await _showMediaOnDisplay(
+        mediaUri: mediaUri,
+        mediaName: mediaName,
+        mediaType: mediaType,
+        displayId: displayId,
+        scaleMode: scaleMode,
+        rotationMode: rotationMode,
+        sourceUri: mediaUri,
+        source: '开机恢复',
       );
     } catch (_) {
       // Error state has already been shown and logged.
@@ -650,9 +692,11 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     required int? displayId,
     required ScaleMode scaleMode,
     required RotationMode rotationMode,
+    String? sourceUri,
     required String source,
   }) async {
     final targetDisplayId = _resolveDisplayId(displayId ?? _selectedDisplayId);
+    final effectiveSourceUri = sourceUri ?? mediaUri;
 
     if (targetDisplayId == null) {
       _addLog('显示失败：未选择副屏');
@@ -666,9 +710,10 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       throw StateError('请先选择图片或视频');
     }
 
+    final displayMediaUri = await _resolveDisplayMediaUri(mediaUri, mediaType);
     _addLog(
       '开始显示：source=$source display=$targetDisplayId scale=${scaleMode.wireName} '
-      'rotation=${rotationMode.degrees} type=$mediaType media=$mediaUri',
+      'rotation=${rotationMode.degrees} type=$mediaType media=$displayMediaUri',
     );
     setState(() {
       _isLoading = true;
@@ -678,15 +723,17 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     try {
       await _channel.invokeMapMethod<String, dynamic>('showImage', {
         'displayId': targetDisplayId,
-        'imageUri': mediaUri,
-        'mediaUri': mediaUri,
+        'imageUri': displayMediaUri,
+        'mediaUri': displayMediaUri,
+        'sourceUri': effectiveSourceUri,
+        'mediaName': mediaName,
         'mediaType': mediaType,
         'scaleMode': scaleMode.wireName,
         'rotationDegrees': rotationMode.degrees,
       });
 
       setState(() {
-        _mediaUri = mediaUri;
+        _mediaUri = effectiveSourceUri ?? displayMediaUri;
         _mediaName = mediaName ?? mediaUri;
         _mediaType = mediaType;
         _selectedDisplayId = targetDisplayId;
@@ -707,6 +754,21 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         });
       }
     }
+  }
+
+  Future<String> _resolveDisplayMediaUri(
+    String mediaUri,
+    String mediaType,
+  ) async {
+    final uri = Uri.tryParse(mediaUri);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return mediaUri;
+    }
+
+    return _resolveRemoteMediaUriForDisplay(
+      mediaUri,
+      mediaType: mediaType,
+    );
   }
 
   Future<void> _hideImage() async {

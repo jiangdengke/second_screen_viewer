@@ -44,6 +44,14 @@ class MainActivity : FlutterActivity() {
         const val REQUEST_PICK_IMAGE = 9101
         const val PREFS_NAME = "second_screen_viewer"
         const val TAG = "SecondScreenViewer"
+        const val PREF_IS_SHOWING = "isShowing"
+        const val PREF_LAST_SHOWN_MEDIA_URI = "lastShownMediaUri"
+        const val PREF_LAST_SHOWN_MEDIA_NAME = "lastShownMediaName"
+        const val PREF_LAST_SHOWN_MEDIA_TYPE = "lastShownMediaType"
+        const val PREF_LAST_SHOWN_SOURCE_URI = "lastShownSourceUri"
+        const val PREF_LAST_SHOWN_DISPLAY_ID = "lastShownDisplayId"
+        const val PREF_LAST_SHOWN_SCALE_MODE = "lastShownScaleMode"
+        const val PREF_LAST_SHOWN_ROTATION_DEGREES = "lastShownRotationDegrees"
     }
 
     private lateinit var channel: MethodChannel
@@ -105,6 +113,7 @@ class MainActivity : FlutterActivity() {
             .putString("mediaName", name)
             .putString("mediaMimeType", mimeType)
             .putString("mediaType", mediaType)
+            .putString("sourceUri", uri.toString())
             .putString("imageUri", uri.toString())
             .putString("imageName", name)
             .apply()
@@ -120,8 +129,9 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        currentPresentation?.dismiss()
+        val presentation = currentPresentation
         currentPresentation = null
+        presentation?.dismiss()
         pendingPickResult?.error("ACTIVITY_DESTROYED", "主界面已关闭", null)
         pendingPickResult = null
         super.onDestroy()
@@ -147,16 +157,58 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun getSavedConfig(): Map<String, Any?> {
+        val isShowing = prefs.getBoolean(PREF_IS_SHOWING, false)
+
+        val selectedMediaUri = prefs.getString("mediaUri", prefs.getString("imageUri", null))
+        val selectedMediaName = prefs.getString("mediaName", prefs.getString("imageName", null))
+        val selectedMediaType = prefs.getString("mediaType", "image")
+        val selectedSourceUri = prefs.getString("sourceUri", selectedMediaUri)
+        val selectedDisplayId =
+            if (prefs.contains("displayId")) prefs.getInt("displayId", -1) else null
+        val selectedScaleMode = prefs.getString("scaleMode", "centerCrop")
+        val selectedRotationDegrees = prefs.getInt("rotationDegrees", 0)
+
+        val shownMediaUri = prefs.getString(PREF_LAST_SHOWN_MEDIA_URI, null)
+        val shownMediaName = prefs.getString(PREF_LAST_SHOWN_MEDIA_NAME, null)
+        val shownMediaType = prefs.getString(PREF_LAST_SHOWN_MEDIA_TYPE, null)
+        val shownSourceUri = prefs.getString(PREF_LAST_SHOWN_SOURCE_URI, shownMediaUri)
+        val shownDisplayId =
+            if (prefs.contains(PREF_LAST_SHOWN_DISPLAY_ID)) {
+                prefs.getInt(PREF_LAST_SHOWN_DISPLAY_ID, -1)
+            } else {
+                null
+            }
+        val shownScaleMode = prefs.getString(PREF_LAST_SHOWN_SCALE_MODE, "centerCrop")
+        val shownRotationDegrees = prefs.getInt(PREF_LAST_SHOWN_ROTATION_DEGREES, 0)
+
+        val effectiveMediaUri =
+            if (isShowing) shownSourceUri ?: shownMediaUri ?: selectedSourceUri ?: selectedMediaUri
+            else selectedMediaUri
+        val effectiveMediaName =
+            if (isShowing) shownMediaName ?: selectedMediaName else selectedMediaName
+        val effectiveMediaType =
+            if (isShowing) shownMediaType ?: selectedMediaType else selectedMediaType
+        val effectiveSourceUri =
+            if (isShowing) shownSourceUri ?: selectedSourceUri else selectedSourceUri
+        val effectiveDisplayId =
+            if (isShowing) shownDisplayId ?: selectedDisplayId else selectedDisplayId
+        val effectiveScaleMode =
+            if (isShowing) shownScaleMode ?: selectedScaleMode else selectedScaleMode
+        val effectiveRotationDegrees =
+            if (isShowing) shownRotationDegrees else selectedRotationDegrees
+
         return mapOf(
-            "imageUri" to prefs.getString("mediaUri", prefs.getString("imageUri", null)),
-            "imageName" to prefs.getString("mediaName", prefs.getString("imageName", null)),
-            "mediaUri" to prefs.getString("mediaUri", prefs.getString("imageUri", null)),
-            "mediaName" to prefs.getString("mediaName", prefs.getString("imageName", null)),
-            "mediaType" to prefs.getString("mediaType", "image"),
+            "imageUri" to effectiveMediaUri,
+            "imageName" to effectiveMediaName,
+            "mediaUri" to effectiveMediaUri,
+            "mediaName" to effectiveMediaName,
+            "mediaType" to effectiveMediaType,
             "mediaMimeType" to prefs.getString("mediaMimeType", ""),
-            "displayId" to if (prefs.contains("displayId")) prefs.getInt("displayId", -1) else null,
-            "scaleMode" to prefs.getString("scaleMode", "centerCrop"),
-            "rotationDegrees" to prefs.getInt("rotationDegrees", 0)
+            "sourceUri" to effectiveSourceUri,
+            "displayId" to effectiveDisplayId,
+            "scaleMode" to effectiveScaleMode,
+            "rotationDegrees" to effectiveRotationDegrees,
+            "isShowing" to isShowing
         )
     }
 
@@ -189,6 +241,9 @@ class MainActivity : FlutterActivity() {
         val mediaUriString = args?.get("imageUri") as? String
             ?: args?.get("mediaUri") as? String
             ?: prefs.getString("mediaUri", prefs.getString("imageUri", null))
+        val mediaName = args?.get("mediaName") as? String
+            ?: prefs.getString("mediaName", prefs.getString("imageName", null))
+        val sourceUriString = args?.get("sourceUri") as? String ?: mediaUriString
         val scaleMode = args?.get("scaleMode") as? String
             ?: prefs.getString("scaleMode", "centerCrop")
             ?: "centerCrop"
@@ -231,6 +286,9 @@ class MainActivity : FlutterActivity() {
         presentation.setOnDismissListener {
             if (currentPresentation === presentation) {
                 currentPresentation = null
+                prefs.edit()
+                    .putBoolean(PREF_IS_SHOWING, false)
+                    .apply()
                 if (::channel.isInitialized) {
                     channel.invokeMethod("presentationDismissed", null)
                 }
@@ -246,11 +304,22 @@ class MainActivity : FlutterActivity() {
 
             prefs.edit()
                 .putString("mediaUri", mediaUriString)
+                .putString("mediaName", mediaName)
                 .putString("mediaType", mediaType)
+                .putString("sourceUri", sourceUriString)
                 .putString("imageUri", mediaUriString)
+                .putString("imageName", mediaName)
                 .putInt("displayId", displayId)
                 .putString("scaleMode", scaleMode.toImageScaleMode())
                 .putInt("rotationDegrees", rotationDegrees)
+                .putBoolean(PREF_IS_SHOWING, true)
+                .putString(PREF_LAST_SHOWN_MEDIA_URI, mediaUriString)
+                .putString(PREF_LAST_SHOWN_MEDIA_NAME, mediaName)
+                .putString(PREF_LAST_SHOWN_MEDIA_TYPE, mediaType)
+                .putString(PREF_LAST_SHOWN_SOURCE_URI, sourceUriString)
+                .putInt(PREF_LAST_SHOWN_DISPLAY_ID, displayId)
+                .putString(PREF_LAST_SHOWN_SCALE_MODE, scaleMode.toImageScaleMode())
+                .putInt(PREF_LAST_SHOWN_ROTATION_DEGREES, rotationDegrees)
                 .apply()
 
             result.success(
@@ -259,6 +328,8 @@ class MainActivity : FlutterActivity() {
                     "imageUri" to mediaUriString,
                     "mediaUri" to mediaUriString,
                     "mediaType" to mediaType,
+                    "mediaName" to mediaName,
+                    "sourceUri" to sourceUriString,
                     "scaleMode" to scaleMode.toImageScaleMode(),
                     "rotationDegrees" to rotationDegrees
                 )
@@ -290,6 +361,9 @@ class MainActivity : FlutterActivity() {
     private fun hideImage(result: MethodChannel.Result) {
         currentPresentation?.dismiss()
         currentPresentation = null
+        prefs.edit()
+            .putBoolean(PREF_IS_SHOWING, false)
+            .apply()
         result.success(true)
     }
 
