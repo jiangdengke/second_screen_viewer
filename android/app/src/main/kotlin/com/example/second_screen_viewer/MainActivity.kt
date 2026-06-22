@@ -21,6 +21,7 @@ class MainActivity : FlutterActivity() {
 
     private lateinit var channel: MethodChannel
     private var pendingPickResult: MethodChannel.Result? = null
+    private var pendingPickMediaType: String? = null
 
     private val prefs by lazy {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -41,7 +42,7 @@ class MainActivity : FlutterActivity() {
                     ControlHttpService.start(this)
                     result.success(ControlHttpService.serviceStatus(applicationContext))
                 }
-                "pickImage" -> pickMedia(result)
+                "pickImage" -> pickMedia(call, result)
                 "showImage" -> showMedia(call, result)
                 "hideImage" -> hideImage(result)
                 else -> result.notImplemented()
@@ -57,7 +58,9 @@ class MainActivity : FlutterActivity() {
         }
 
         val result = pendingPickResult ?: return
+        val requestedMediaType = pendingPickMediaType
         pendingPickResult = null
+        pendingPickMediaType = null
 
         if (resultCode != Activity.RESULT_OK) {
             result.success(null)
@@ -73,7 +76,7 @@ class MainActivity : FlutterActivity() {
         persistReadPermission(uri, data.flags)
         val name = resolveDisplayName(uri) ?: uri.lastPathSegment ?: "已选择媒体"
         val mimeType = contentResolver.getType(uri) ?: ""
-        val mediaType = mimeType.toMediaType()
+        val mediaType = mimeType.toMediaType(requestedMediaType)
 
         prefs.edit()
             .putString("mediaUri", uri.toString())
@@ -98,28 +101,50 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         pendingPickResult?.error("ACTIVITY_DESTROYED", "主界面已关闭", null)
         pendingPickResult = null
+        pendingPickMediaType = null
         super.onDestroy()
     }
 
-    private fun pickMedia(result: MethodChannel.Result) {
+    private fun pickMedia(call: MethodCall, result: MethodChannel.Result) {
         if (pendingPickResult != null) {
             result.error("PICK_IN_PROGRESS", "已经有一个媒体选择任务在进行", null)
             return
         }
 
+        val requestedMediaType = (call.arguments as? Map<*, *>)?.get("mediaType") as? String
+        val normalizedMediaType = when (requestedMediaType) {
+            "video" -> "video"
+            "image" -> "image"
+            else -> null
+        }
+        val mimeTypeFilter = when (normalizedMediaType) {
+            "video" -> "video/*"
+            "image" -> "image/*"
+            else -> "*/*"
+        }
+        val chooserTitle = when (normalizedMediaType) {
+            "video" -> "选择副屏视频"
+            "image" -> "选择副屏图片"
+            else -> "选择副屏媒体"
+        }
+
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+            type = mimeTypeFilter
+            if (mimeTypeFilter == "*/*") {
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
 
         pendingPickResult = result
+        pendingPickMediaType = normalizedMediaType
         try {
-            startActivityForResult(Intent.createChooser(intent, "选择副屏媒体"), REQUEST_PICK_IMAGE)
+            startActivityForResult(Intent.createChooser(intent, chooserTitle), REQUEST_PICK_IMAGE)
         } catch (error: ActivityNotFoundException) {
             pendingPickResult = null
+            pendingPickMediaType = null
             result.error("NO_FILE_PICKER", "系统没有可用的文件选择器", error.message)
         }
     }
@@ -219,9 +244,11 @@ class MainActivity : FlutterActivity() {
     }
 }
 
-private fun String?.toMediaType(): String {
+private fun String?.toMediaType(fallback: String?): String {
     return when {
         this?.startsWith("video/") == true -> "video"
+        this?.startsWith("image/") == true -> "image"
+        fallback == "video" -> "video"
         this == "video" -> "video"
         else -> "image"
     }

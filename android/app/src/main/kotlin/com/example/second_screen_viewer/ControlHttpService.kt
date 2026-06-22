@@ -38,7 +38,7 @@ class ControlHttpService : Service() {
     companion object {
         const val CONTROL_PORT = 9999
         private const val TAG = "SecondScreenViewer"
-        private const val APP_VERSION_LABEL = "版本 1.2.5 (14)"
+        private const val APP_VERSION_LABEL = "版本 1.2.6 (15)"
         private const val NOTIFICATION_CHANNEL_ID = "second_screen_control"
         private const val NOTIFICATION_ID = 1001
 

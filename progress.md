@@ -65,3 +65,43 @@
 - `android/app/src/main/kotlin/com/example/second_screen_viewer/MainActivity.kt`：简化为 Flutter 与原生服务/副屏控制的入口。
 - `android/gradle.properties`：保留 Flutter 构建过程中自动补充的 Gradle 兼容标记。
 - 回滚方式：回退本次提交，或将 `BootCompletedReceiver` 恢复为启动 `MainActivity`、移除 `ControlHttpService` 和 Manifest 服务声明，并恢复 `lib/main.dart` 中的 Dart `HttpServer` 监听逻辑。
+
+## 2026-06-22 - Task: 修复图片选择器只显示视频
+
+### What was done
+
+- 将主界面的媒体选择拆成“选择图片”和“选择视频”两个入口，避免厂商文件选择器在混合 MIME 筛选时只显示视频。
+- 原生文件选择器按入口分别使用 `image/*` 或 `video/*`，并在 MIME 类型缺失时使用入口类型兜底。
+- 更新界面测试，确认两个选择入口都展示。
+
+### Testing
+
+- `flutter analyze && flutter test && flutter build apk --release`：通过。
+- 真机文件选择器中图片目录是否正常展示，仍需在目标 RK3588/Android 设备上用同一目录复测。
+
+### Notes
+
+- `lib/main.dart`：媒体选择按钮拆分为图片和视频入口，并向原生层传入选择类型。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/MainActivity.kt`：根据选择类型设置系统文件选择器 MIME 过滤，并增加类型兜底。
+- `test/widget_test.dart`：更新界面断言，覆盖“选择图片”和“选择视频”按钮。
+- `progress.md`：记录本轮排查、修复、验证和回滚方式。
+- 回滚方式：回退本轮修改，恢复单个“选择图片或视频”按钮，以及原生 `ACTION_OPEN_DOCUMENT` 的 `image/*`、`video/*` 混合筛选。
+
+## 2026-06-22 - Task: 图片选择器修复发版
+
+### What was done
+
+- 将版本更新到 `1.2.6+15`，用于发布图片选择器修复版本。
+- 同步 Flutter 页面和后台服务状态中的版本展示为 `版本 1.2.6 (15)`。
+
+### Testing
+
+- `flutter analyze && flutter test && flutter build apk --release`：通过。
+
+### Notes
+
+- `pubspec.yaml`：发版号更新到 `1.2.6+15`。
+- `lib/main.dart`：页面底部版本展示更新到 `版本 1.2.6 (15)`。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：后台服务状态版本展示更新到 `版本 1.2.6 (15)`。
+- `progress.md`：记录本轮发版准备、验证和回滚方式。
+- 回滚方式：回退本轮版本号修改，或删除 `v1.2.6` tag 并回到上一版 `v1.2.5` 发布产物。

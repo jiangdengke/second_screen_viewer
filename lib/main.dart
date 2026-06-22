@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.5 (14)';
+const appVersionLabel = '版本 1.2.6 (15)';
 const httpControlPort = 9999;
 
 void main() {
@@ -347,8 +347,9 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     _remoteMediaCache.clear();
   }
 
-  Future<void> _pickMedia() async {
-    _addLog('打开媒体选择器');
+  Future<void> _pickMedia(String mediaType) async {
+    final mediaTypeLabel = mediaType == 'video' ? '视频' : '图片';
+    _addLog('打开$mediaTypeLabel选择器');
     setState(() {
       _isLoading = true;
       _status = null;
@@ -357,6 +358,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     try {
       final result = await _channel.invokeMapMethod<String, dynamic>(
         'pickImage',
+        {'mediaType': mediaType},
       );
 
       if (result == null) {
@@ -642,9 +644,19 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
                       ),
                       const SizedBox(height: 12),
                       FilledButton.icon(
-                        onPressed: _isLoading ? null : _pickMedia,
-                        icon: const Icon(Icons.perm_media_outlined),
-                        label: const Text('选择图片或视频'),
+                        onPressed: _isLoading
+                            ? null
+                            : () => _pickMedia('image'),
+                        icon: const Icon(Icons.image_outlined),
+                        label: const Text('选择图片'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _isLoading
+                            ? null
+                            : () => _pickMedia('video'),
+                        icon: const Icon(Icons.video_library_outlined),
+                        label: const Text('选择视频'),
                       ),
                     ],
                   ),

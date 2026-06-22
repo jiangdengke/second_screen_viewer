@@ -61,7 +61,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('副屏媒体显示'), findsOneWidget);
-    expect(find.text('选择图片或视频'), findsOneWidget);
+    expect(find.text('选择图片'), findsOneWidget);
+    expect(find.text('选择视频'), findsOneWidget);
     expect(find.textContaining('HDMI Screen'), findsOneWidget);
 
     await tester.drag(find.byType(ListView), const Offset(0, -500));
