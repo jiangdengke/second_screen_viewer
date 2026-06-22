@@ -1,11 +1,9 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.4 (13)';
+const appVersionLabel = '版本 1.2.5 (14)';
 const httpControlPort = 9999;
 
 void main() {
@@ -45,9 +43,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
 
   final List<DeviceDisplay> _displays = [];
   final Map<String, String> _remoteMediaCache = {};
-  HttpServer? _httpServer;
-  Timer? _imageSlideshowTimer;
-  bool _isSlideshowTicking = false;
   String? _controlAddress;
   String? _httpServerStatus;
   String? _mediaUri;
@@ -69,13 +64,11 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     super.initState();
     _channel.setMethodCallHandler(_handleNativeMethodCall);
     _loadInitialState();
-    _startHttpServer();
+    _startControlService();
   }
 
   @override
   void dispose() {
-    _imageSlideshowTimer?.cancel();
-    _httpServer?.close(force: true);
     _clearRemoteMediaCache();
     super.dispose();
   }
@@ -150,7 +143,8 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         'getSavedConfig',
       );
 
-      final savedSourceUri = config?['sourceUri'] as String? ??
+      final savedSourceUri =
+          config?['sourceUri'] as String? ??
           config?['mediaUri'] as String? ??
           config?['imageUri'] as String?;
       final savedDisplayId = config?['displayId'] as int?;
@@ -160,7 +154,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       final savedRotationMode = RotationMode.fromDegrees(
         config?['rotationDegrees'] as int?,
       );
-      final shouldRestore = config?['isShowing'] == true && savedSourceUri != null;
 
       setState(() {
         _mediaUri = savedSourceUri;
@@ -170,23 +163,13 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         _selectedDisplayId = _resolveDisplayId(savedDisplayId);
         _scaleMode = savedScaleMode;
         _rotationMode = savedRotationMode;
+        _isShowing = config?['isShowing'] == true;
       });
       _addLog(
         '配置：display=$_selectedDisplayId media=${_mediaName ?? _mediaUri ?? '未选择'} '
         'type=$_mediaType '
         'scale=${_scaleMode.wireName} rotation=${_rotationMode.degrees}',
       );
-
-      if (shouldRestore && mounted) {
-        await _restoreLastShownMedia(
-          mediaUri: savedSourceUri,
-          mediaName: _mediaName,
-          mediaType: _mediaType,
-          displayId: _selectedDisplayId,
-          scaleMode: _scaleMode,
-          rotationMode: _rotationMode,
-        );
-      }
     } on PlatformException catch (error) {
       _handlePlatformError('读取设备状态失败', error);
     } finally {
@@ -252,30 +235,23 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     return _secondaryDisplays.first.id;
   }
 
-  Future<void> _startHttpServer() async {
+  Future<void> _startControlService() async {
     try {
-      final server = await HttpServer.bind(
-        InternetAddress.anyIPv4,
-        httpControlPort,
-        shared: true,
+      final serviceStatus = await _channel.invokeMapMethod<String, dynamic>(
+        'startControlService',
       );
-      _httpServer = server;
-      final address = await _resolveControlAddress(httpControlPort);
+      final address =
+          serviceStatus?['controlUrl'] as String? ??
+          await _resolveControlAddress(httpControlPort);
+      final status = serviceStatus?['httpStatus'] as String? ?? '启动中';
       if (!mounted) {
-        await server.close(force: true);
         return;
       }
       setState(() {
         _controlAddress = address;
-        _httpServerStatus = '运行中';
+        _httpServerStatus = status;
       });
-      _addLog('HTTP服务启动成功：$address 监听端口=$httpControlPort');
-      server.listen(
-        _handleHttpRequest,
-        onError: (Object error) {
-          _addLog('HTTP服务错误：$error');
-        },
-      );
+      _addLog('后台HTTP控制服务：$status $address');
     } catch (error) {
       if (!mounted) {
         return;
@@ -283,7 +259,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       setState(() {
         _httpServerStatus = '启动失败：$error';
       });
-      _addLog('HTTP服务启动失败：$error');
+      _addLog('后台HTTP控制服务启动失败：$error');
     }
   }
 
@@ -304,233 +280,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     }
 
     return 'http://0.0.0.0:$port';
-  }
-
-  Future<void> _handleHttpRequest(HttpRequest request) async {
-    _applyCorsHeaders(request.response);
-
-    if (request.method == 'OPTIONS') {
-      request.response.statusCode = HttpStatus.noContent;
-      await request.response.close();
-      return;
-    }
-
-    try {
-      final path = request.uri.path.toLowerCase();
-      final remoteAddress =
-          request.connectionInfo?.remoteAddress.address ?? 'unknown';
-      _addLog(
-        'HTTP调用：${request.method} ${request.uri.path} from=$remoteAddress',
-      );
-      if (request.method == 'GET' && path == '/api/status') {
-        await _sendJson(request.response, _successResponse(_statusPayload()));
-        return;
-      }
-
-      if (request.method == 'GET' && path == '/api/displays') {
-        await _refreshDisplays(updateLoading: false);
-        await _sendJson(
-          request.response,
-          _successResponse({
-            'displays': _displays.map((display) => display.toJson()).toList(),
-          }),
-        );
-        return;
-      }
-
-      if (request.method == 'POST' &&
-          (path == '/api/hide' || path == '/robot_task/screen_stop')) {
-        _addLog('HTTP停止调用：${request.uri.path}');
-        _stopImageSlideshow(clearCache: true);
-        await _hideImage();
-        await _sendJson(request.response, _successResponse(_statusPayload()));
-        return;
-      }
-
-      if (request.method != 'POST') {
-        await _sendJson(
-          request.response,
-          _errorResponse('METHOD_NOT_ALLOWED', '只支持 POST 请求'),
-          statusCode: HttpStatus.methodNotAllowed,
-        );
-        return;
-      }
-
-      final payload = await _readJsonBody(request);
-      if (path == '/robot_task/screen_control') {
-        await _handleVideoControlRequest(request, payload);
-        return;
-      }
-
-      if (path == '/robot_task/screen_control_img_display') {
-        await _handleImageControlRequest(request, payload);
-        return;
-      }
-
-      await _sendJson(
-        request.response,
-        _errorResponse('NOT_FOUND', '未知接口：${request.uri.path}'),
-        statusCode: HttpStatus.notFound,
-      );
-    } catch (error) {
-      _addLog('HTTP请求失败：${request.method} ${request.uri.path} $error');
-      await _sendJson(
-        request.response,
-        _errorResponse('REQUEST_FAILED', error.toString()),
-        statusCode: HttpStatus.badRequest,
-      );
-    }
-  }
-
-  Future<void> _handleVideoControlRequest(
-    HttpRequest request,
-    Map<String, dynamic> payload,
-  ) async {
-    final url = _stringValue(payload['url']);
-    if (url == null || url.isEmpty) {
-      throw ArgumentError('缺少 url');
-    }
-
-    _stopImageSlideshow(clearCache: true);
-    final mediaType =
-        _stringValue(payload['mediaType']) ?? _inferMediaType(url);
-    final displayId = _intValue(payload['displayId'] ?? payload['display_id']);
-    final scaleMode = _scaleModeFromPayload(payload);
-    final rotationMode = _rotationModeFromPayload(payload);
-    _addLog(
-      'HTTP视频调用：url=$url display=${displayId ?? '默认副屏'} '
-      'scale=${scaleMode.wireName} rotation=${rotationMode.degrees}',
-    );
-    final resolvedUri = await _resolveRemoteMediaUriForDisplay(
-      url,
-      mediaType: mediaType,
-    );
-    final shownDisplayId = await _showMediaOnDisplay(
-      mediaUri: resolvedUri,
-      mediaName: _fileNameFromUrl(url),
-      mediaType: mediaType,
-      displayId: displayId,
-      scaleMode: scaleMode,
-      rotationMode: rotationMode,
-      sourceUri: url,
-      source: 'HTTP视频接口',
-    );
-
-    await _sendJson(
-      request.response,
-      _successResponse({
-        ..._statusPayload(),
-        'displayId': shownDisplayId,
-        'url': url,
-      }),
-    );
-  }
-
-  Future<void> _handleImageControlRequest(
-    HttpRequest request,
-    Map<String, dynamic> payload,
-  ) async {
-    final urls = _urlListValue(payload['url']);
-    if (urls.isEmpty) {
-      throw ArgumentError('缺少 url 图片列表');
-    }
-
-    final intervalMs = _intValue(payload['time_sleep']) ?? 2000;
-    final displayId = _intValue(payload['displayId'] ?? payload['display_id']);
-    final scaleMode = _scaleModeFromPayload(payload);
-    final rotationMode = _rotationModeFromPayload(payload);
-    _addLog(
-      'HTTP图片轮播调用：count=${urls.length} interval=${intervalMs}ms '
-      'display=${displayId ?? '默认副屏'} scale=${scaleMode.wireName} '
-      'rotation=${rotationMode.degrees}',
-    );
-    final shownDisplayId = await _startImageSlideshow(
-      urls: urls,
-      intervalMs: intervalMs,
-      displayId: displayId,
-      scaleMode: scaleMode,
-      rotationMode: rotationMode,
-    );
-
-    await _sendJson(
-      request.response,
-      _successResponse({
-        ..._statusPayload(),
-        'displayId': shownDisplayId,
-        'time_sleep': intervalMs,
-        'url': urls,
-      }),
-    );
-  }
-
-  Future<Map<String, dynamic>> _readJsonBody(HttpRequest request) async {
-    final rawBody = await utf8.decoder.bind(request).join();
-    if (rawBody.trim().isEmpty) {
-      return {};
-    }
-
-    final decoded = jsonDecode(rawBody);
-    if (decoded is! Map) {
-      throw const FormatException('请求体必须是 JSON 对象');
-    }
-
-    return decoded.map((key, value) => MapEntry(key.toString(), value));
-  }
-
-  Future<int> _startImageSlideshow({
-    required List<String> urls,
-    required int intervalMs,
-    required int? displayId,
-    required ScaleMode scaleMode,
-    required RotationMode rotationMode,
-  }) async {
-    _stopImageSlideshow(clearCache: true);
-    final normalizedIntervalMs = intervalMs < 500 ? 500 : intervalMs;
-    var index = 0;
-
-    Future<int> showNextImage() async {
-      final currentIndex = index % urls.length;
-      final sourceUrl = urls[currentIndex];
-      index += 1;
-      final displayUri = await _resolveRemoteMediaUriForDisplay(
-        sourceUrl,
-        mediaType: 'image',
-      );
-      return _showMediaOnDisplay(
-        mediaUri: displayUri,
-        mediaName:
-            '${_fileNameFromUrl(sourceUrl)} (${currentIndex + 1}/${urls.length})',
-        mediaType: 'image',
-        displayId: displayId,
-        scaleMode: scaleMode,
-        rotationMode: rotationMode,
-        sourceUri: sourceUrl,
-        source: 'HTTP图片轮播',
-      );
-    }
-
-    final shownDisplayId = await showNextImage();
-    if (urls.length > 1) {
-      _imageSlideshowTimer = Timer.periodic(
-        Duration(milliseconds: normalizedIntervalMs),
-        (_) async {
-          if (_isSlideshowTicking) {
-            return;
-          }
-          _isSlideshowTicking = true;
-          try {
-            await showNextImage();
-          } catch (error) {
-            _addLog('图片轮播失败：$error');
-          } finally {
-            _isSlideshowTicking = false;
-          }
-        },
-      );
-      _addLog('图片轮播：${urls.length}张 interval=${normalizedIntervalMs}ms');
-    }
-
-    return shownDisplayId;
   }
 
   Future<String> _resolveRemoteMediaUriForDisplay(
@@ -584,15 +333,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     }
   }
 
-  void _stopImageSlideshow({bool clearCache = false}) {
-    _imageSlideshowTimer?.cancel();
-    _imageSlideshowTimer = null;
-    _isSlideshowTicking = false;
-    if (clearCache) {
-      _clearRemoteMediaCache();
-    }
-  }
-
   void _clearRemoteMediaCache() {
     for (final fileUri in _remoteMediaCache.values) {
       final uri = Uri.tryParse(fileUri);
@@ -643,7 +383,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   }
 
   Future<void> _showImage() async {
-    _stopImageSlideshow(clearCache: false);
     try {
       await _showMediaOnDisplay(
         mediaUri: _mediaUri,
@@ -654,31 +393,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
         rotationMode: _rotationMode,
         sourceUri: _mediaUri,
         source: '主界面',
-      );
-    } catch (_) {
-      // Error state has already been shown and logged.
-    }
-  }
-
-  Future<void> _restoreLastShownMedia({
-    required String mediaUri,
-    required String? mediaName,
-    required String mediaType,
-    required int? displayId,
-    required ScaleMode scaleMode,
-    required RotationMode rotationMode,
-  }) async {
-    _addLog('启动：自动恢复上次显示内容');
-    try {
-      await _showMediaOnDisplay(
-        mediaUri: mediaUri,
-        mediaName: mediaName,
-        mediaType: mediaType,
-        displayId: displayId,
-        scaleMode: scaleMode,
-        rotationMode: rotationMode,
-        sourceUri: mediaUri,
-        source: '开机恢复',
       );
     } catch (_) {
       // Error state has already been shown and logged.
@@ -765,10 +479,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
       return mediaUri;
     }
 
-    return _resolveRemoteMediaUriForDisplay(
-      mediaUri,
-      mediaType: mediaType,
-    );
+    return _resolveRemoteMediaUriForDisplay(mediaUri, mediaType: mediaType);
   }
 
   Future<void> _hideImage() async {
@@ -836,110 +547,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     setState(() {
       _logs.clear();
     });
-  }
-
-  Map<String, dynamic> _statusPayload() {
-    return {
-      'version': appVersionLabel,
-      'controlUrl': _controlAddress,
-      'httpStatus': _httpServerStatus,
-      'isShowing': _isShowing,
-      'mediaUri': _mediaUri,
-      'mediaName': _mediaName,
-      'mediaType': _mediaType,
-      'displayId': _selectedDisplayId,
-      'scaleMode': _scaleMode.wireName,
-      'rotationDegrees': _rotationMode.degrees,
-    };
-  }
-
-  Map<String, dynamic> _successResponse(Map<String, dynamic> data) {
-    return {'code': 200, 'msg': 'success', 'data': data};
-  }
-
-  Map<String, dynamic> _errorResponse(String error, String message) {
-    return {'code': 400, 'msg': message, 'error': error};
-  }
-
-  void _applyCorsHeaders(HttpResponse response) {
-    response.headers
-      ..set('Access-Control-Allow-Origin', '*')
-      ..set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      ..set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  }
-
-  Future<void> _sendJson(
-    HttpResponse response,
-    Map<String, dynamic> payload, {
-    int statusCode = HttpStatus.ok,
-  }) async {
-    response.statusCode = statusCode;
-    response.headers.contentType = ContentType.json;
-    response.write(jsonEncode(payload));
-    await response.close();
-  }
-
-  String? _stringValue(Object? value) {
-    if (value == null) {
-      return null;
-    }
-    final text = value.toString().trim();
-    return text.isEmpty ? null : text;
-  }
-
-  int? _intValue(Object? value) {
-    if (value == null) {
-      return null;
-    }
-    if (value is int) {
-      return value;
-    }
-    if (value is num) {
-      return value.toInt();
-    }
-    return int.tryParse(value.toString());
-  }
-
-  List<String> _urlListValue(Object? value) {
-    if (value is List) {
-      return value
-          .map(_stringValue)
-          .whereType<String>()
-          .where((url) => url.isNotEmpty)
-          .toList(growable: false);
-    }
-
-    final singleUrl = _stringValue(value);
-    return singleUrl == null ? const [] : [singleUrl];
-  }
-
-  ScaleMode _scaleModeFromPayload(Map<String, dynamic> payload) {
-    return ScaleMode.fromWireName(
-      _stringValue(payload['scaleMode'] ?? payload['scale_mode']),
-    );
-  }
-
-  RotationMode _rotationModeFromPayload(Map<String, dynamic> payload) {
-    return RotationMode.fromDegrees(
-      _intValue(
-        payload['rotationDegrees'] ??
-            payload['rotation_degrees'] ??
-            payload['rotation'],
-      ),
-    );
-  }
-
-  String _inferMediaType(String url) {
-    final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
-    if (path.endsWith('.jpg') ||
-        path.endsWith('.jpeg') ||
-        path.endsWith('.png') ||
-        path.endsWith('.webp') ||
-        path.endsWith('.bmp') ||
-        path.endsWith('.gif')) {
-      return 'image';
-    }
-    return 'video';
   }
 
   String _fileNameFromUrl(String url) {
