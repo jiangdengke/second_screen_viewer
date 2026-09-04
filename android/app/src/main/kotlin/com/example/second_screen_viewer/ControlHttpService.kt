@@ -38,7 +38,7 @@ class ControlHttpService : Service() {
     companion object {
         const val CONTROL_PORT = 9999
         private const val TAG = "SecondScreenViewer"
-        private const val APP_VERSION_LABEL = "版本 1.2.6 (15)"
+        private const val APP_VERSION_LABEL = "版本 1.2.7 (16)"
         private const val NOTIFICATION_CHANNEL_ID = "second_screen_control"
         private const val NOTIFICATION_ID = 1001
 
@@ -95,7 +95,6 @@ class ControlHttpService : Service() {
     private var serverThread: Thread? = null
     private var serverSocket: ServerSocket? = null
     private var isSlideshowTicking = false
-    private var restoredLastMedia = false
 
     @Volatile
     private var running = false
@@ -105,13 +104,11 @@ class ControlHttpService : Service() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         startHttpServerIfNeeded()
-        restoreLastShownMediaIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         startHttpServerIfNeeded()
-        restoreLastShownMediaIfNeeded()
         return START_STICKY
     }
 
@@ -464,46 +461,6 @@ class ControlHttpService : Service() {
             throw error
         } finally {
             connection.disconnect()
-        }
-    }
-
-    private fun restoreLastShownMediaIfNeeded() {
-        if (restoredLastMedia) {
-            return
-        }
-        restoredLastMedia = true
-
-        clientExecutor.execute {
-            val config = SecondScreenDisplayController.getSavedConfig(this)
-            if (config["isShowing"] != true) {
-                return@execute
-            }
-
-            val sourceUri = config["sourceUri"] as? String
-                ?: config["mediaUri"] as? String
-                ?: config["imageUri"] as? String
-                ?: return@execute
-            val mediaType = (config["mediaType"] as? String) ?: inferMediaType(sourceUri)
-            val displayUri = resolveRemoteMediaUriForDisplay(sourceUri, mediaType)
-            try {
-                SecondScreenDisplayController.showMedia(
-                    this,
-                    DisplayMediaRequest(
-                        displayId = (config["displayId"] as? Number)?.toInt(),
-                        mediaUri = displayUri,
-                        mediaName = config["mediaName"] as? String ?: config["imageName"] as? String,
-                        sourceUri = sourceUri,
-                        mediaType = mediaType,
-                        scaleMode = config["scaleMode"] as? String,
-                        rotationDegrees = (config["rotationDegrees"] as? Number)?.toInt() ?: 0,
-                    ),
-                    ::handlePresentationEvent
-                )
-                lastServiceMessage = "已恢复上次副屏显示"
-            } catch (error: Exception) {
-                lastServiceMessage = "恢复上次副屏显示失败：${error.message ?: error.toString()}"
-                Log.e(TAG, "Failed to restore last media", error)
-            }
         }
     }
 

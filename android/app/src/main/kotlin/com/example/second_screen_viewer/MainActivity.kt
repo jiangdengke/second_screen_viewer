@@ -2,7 +2,6 @@ package com.example.second_screen_viewer
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
-import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
@@ -16,16 +15,11 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val CHANNEL_NAME = "second_screen_viewer/display"
         const val REQUEST_PICK_IMAGE = 9101
-        const val PREFS_NAME = "second_screen_viewer"
     }
 
     private lateinit var channel: MethodChannel
     private var pendingPickResult: MethodChannel.Result? = null
     private var pendingPickMediaType: String? = null
-
-    private val prefs by lazy {
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -77,16 +71,6 @@ class MainActivity : FlutterActivity() {
         val name = resolveDisplayName(uri) ?: uri.lastPathSegment ?: "已选择媒体"
         val mimeType = contentResolver.getType(uri) ?: ""
         val mediaType = mimeType.toMediaType(requestedMediaType)
-
-        prefs.edit()
-            .putString("mediaUri", uri.toString())
-            .putString("mediaName", name)
-            .putString("mediaMimeType", mimeType)
-            .putString("mediaType", mediaType)
-            .putString("sourceUri", uri.toString())
-            .putString("imageUri", uri.toString())
-            .putString("imageName", name)
-            .apply()
 
         result.success(
             mapOf(
@@ -154,17 +138,12 @@ class MainActivity : FlutterActivity() {
         val displayId = args?.get("displayId").asInt()
         val mediaUriString = args?.get("imageUri") as? String
             ?: args?.get("mediaUri") as? String
-            ?: prefs.getString("mediaUri", prefs.getString("imageUri", null))
         val mediaName = args?.get("mediaName") as? String
-            ?: prefs.getString("mediaName", prefs.getString("imageName", null))
         val sourceUriString = args?.get("sourceUri") as? String ?: mediaUriString
         val scaleMode = args?.get("scaleMode") as? String
-            ?: prefs.getString("scaleMode", "centerCrop")
             ?: "centerCrop"
-        val rotationDegrees = args?.get("rotationDegrees").asInt()
-            ?: prefs.getInt("rotationDegrees", 0)
+        val rotationDegrees = args?.get("rotationDegrees").asInt() ?: 0
         val mediaType = args?.get("mediaType") as? String
-            ?: prefs.getString("mediaType", null)
 
         try {
             val response = SecondScreenDisplayController.showMedia(

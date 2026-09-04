@@ -2,7 +2,6 @@ package com.example.second_screen_viewer
 
 import android.app.Presentation
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -50,19 +49,13 @@ class SecondScreenDisplayException(
 ) : Exception(message)
 
 object SecondScreenDisplayController {
-    private const val PREFS_NAME = "second_screen_viewer"
     private const val TAG = "SecondScreenViewer"
-    private const val PREF_IS_SHOWING = "isShowing"
-    private const val PREF_LAST_SHOWN_MEDIA_URI = "lastShownMediaUri"
-    private const val PREF_LAST_SHOWN_MEDIA_NAME = "lastShownMediaName"
-    private const val PREF_LAST_SHOWN_MEDIA_TYPE = "lastShownMediaType"
-    private const val PREF_LAST_SHOWN_SOURCE_URI = "lastShownSourceUri"
-    private const val PREF_LAST_SHOWN_DISPLAY_ID = "lastShownDisplayId"
-    private const val PREF_LAST_SHOWN_SCALE_MODE = "lastShownScaleMode"
-    private const val PREF_LAST_SHOWN_ROTATION_DEGREES = "lastShownRotationDegrees"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var currentPresentation: SecondScreenMediaPresentation? = null
+
+    @Volatile
+    private var currentMediaConfig: Map<String, Any?>? = null
 
     fun getDisplays(context: Context): List<Map<String, Any?>> {
         val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -85,59 +78,22 @@ object SecondScreenDisplayController {
     }
 
     fun getSavedConfig(context: Context): Map<String, Any?> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val isShowing = prefs.getBoolean(PREF_IS_SHOWING, false)
+        return currentMediaConfig ?: emptyMediaConfig()
+    }
 
-        val selectedMediaUri = prefs.getString("mediaUri", prefs.getString("imageUri", null))
-        val selectedMediaName = prefs.getString("mediaName", prefs.getString("imageName", null))
-        val selectedMediaType = prefs.getString("mediaType", "image")
-        val selectedSourceUri = prefs.getString("sourceUri", selectedMediaUri)
-        val selectedDisplayId =
-            if (prefs.contains("displayId")) prefs.getInt("displayId", -1) else null
-        val selectedScaleMode = prefs.getString("scaleMode", "centerCrop")
-        val selectedRotationDegrees = prefs.getInt("rotationDegrees", 0)
-
-        val shownMediaUri = prefs.getString(PREF_LAST_SHOWN_MEDIA_URI, null)
-        val shownMediaName = prefs.getString(PREF_LAST_SHOWN_MEDIA_NAME, null)
-        val shownMediaType = prefs.getString(PREF_LAST_SHOWN_MEDIA_TYPE, null)
-        val shownSourceUri = prefs.getString(PREF_LAST_SHOWN_SOURCE_URI, shownMediaUri)
-        val shownDisplayId =
-            if (prefs.contains(PREF_LAST_SHOWN_DISPLAY_ID)) {
-                prefs.getInt(PREF_LAST_SHOWN_DISPLAY_ID, -1)
-            } else {
-                null
-            }
-        val shownScaleMode = prefs.getString(PREF_LAST_SHOWN_SCALE_MODE, "centerCrop")
-        val shownRotationDegrees = prefs.getInt(PREF_LAST_SHOWN_ROTATION_DEGREES, 0)
-
-        val effectiveMediaUri =
-            if (isShowing) shownSourceUri ?: shownMediaUri ?: selectedSourceUri ?: selectedMediaUri
-            else selectedMediaUri
-        val effectiveMediaName =
-            if (isShowing) shownMediaName ?: selectedMediaName else selectedMediaName
-        val effectiveMediaType =
-            if (isShowing) shownMediaType ?: selectedMediaType else selectedMediaType
-        val effectiveSourceUri =
-            if (isShowing) shownSourceUri ?: selectedSourceUri else selectedSourceUri
-        val effectiveDisplayId =
-            if (isShowing) shownDisplayId ?: selectedDisplayId else selectedDisplayId
-        val effectiveScaleMode =
-            if (isShowing) shownScaleMode ?: selectedScaleMode else selectedScaleMode
-        val effectiveRotationDegrees =
-            if (isShowing) shownRotationDegrees else selectedRotationDegrees
-
+    private fun emptyMediaConfig(): Map<String, Any?> {
         return mapOf(
-            "imageUri" to effectiveMediaUri,
-            "imageName" to effectiveMediaName,
-            "mediaUri" to effectiveMediaUri,
-            "mediaName" to effectiveMediaName,
-            "mediaType" to effectiveMediaType,
-            "mediaMimeType" to prefs.getString("mediaMimeType", ""),
-            "sourceUri" to effectiveSourceUri,
-            "displayId" to effectiveDisplayId,
-            "scaleMode" to effectiveScaleMode,
-            "rotationDegrees" to effectiveRotationDegrees,
-            "isShowing" to isShowing
+            "imageUri" to null,
+            "imageName" to null,
+            "mediaUri" to null,
+            "mediaName" to null,
+            "mediaType" to null,
+            "mediaMimeType" to "",
+            "sourceUri" to null,
+            "displayId" to null,
+            "scaleMode" to "centerCrop",
+            "rotationDegrees" to 0,
+            "isShowing" to false
         )
     }
 
@@ -203,18 +159,14 @@ object SecondScreenDisplayController {
         request: DisplayMediaRequest,
         onEvent: (Map<String, Any?>) -> Unit,
     ): Map<String, Any?> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val mediaUriString = request.mediaUri
-            ?: prefs.getString("mediaUri", prefs.getString("imageUri", null))
         val mediaName = request.mediaName
-            ?: prefs.getString("mediaName", prefs.getString("imageName", null))
         val sourceUriString = request.sourceUri ?: mediaUriString
-        val scaleMode = (request.scaleMode ?: prefs.getString("scaleMode", "centerCrop")).toImageScaleMode()
+        val scaleMode = (request.scaleMode ?: "centerCrop").toImageScaleMode()
         val rotationDegrees = request.rotationDegrees
         val mediaType = (
             request.mediaType
-                ?: prefs.getString("mediaType", null)
                 ?: contentTypeForUri(context, mediaUriString).toMediaType()
             ).toMediaType()
         val displayId = resolveDisplayId(context, request.displayId)
@@ -245,9 +197,7 @@ object SecondScreenDisplayController {
         presentation.setOnDismissListener {
             if (currentPresentation === presentation) {
                 currentPresentation = null
-                prefs.edit()
-                    .putBoolean(PREF_IS_SHOWING, false)
-                    .apply()
+                currentMediaConfig = null
                 onEvent(mapOf("type" to "presentationDismissed", "displayId" to displayId))
             }
         }
@@ -255,31 +205,12 @@ object SecondScreenDisplayController {
         try {
             val previousPresentation = currentPresentation
             currentPresentation = null
+            currentMediaConfig = null
             previousPresentation?.dismiss()
             presentation.show()
             currentPresentation = presentation
 
-            prefs.edit()
-                .putString("mediaUri", mediaUriString)
-                .putString("mediaName", mediaName)
-                .putString("mediaType", mediaType)
-                .putString("sourceUri", sourceUriString)
-                .putString("imageUri", mediaUriString)
-                .putString("imageName", mediaName)
-                .putInt("displayId", displayId)
-                .putString("scaleMode", scaleMode)
-                .putInt("rotationDegrees", rotationDegrees)
-                .putBoolean(PREF_IS_SHOWING, true)
-                .putString(PREF_LAST_SHOWN_MEDIA_URI, mediaUriString)
-                .putString(PREF_LAST_SHOWN_MEDIA_NAME, mediaName)
-                .putString(PREF_LAST_SHOWN_MEDIA_TYPE, mediaType)
-                .putString(PREF_LAST_SHOWN_SOURCE_URI, sourceUriString)
-                .putInt(PREF_LAST_SHOWN_DISPLAY_ID, displayId)
-                .putString(PREF_LAST_SHOWN_SCALE_MODE, scaleMode)
-                .putInt(PREF_LAST_SHOWN_ROTATION_DEGREES, rotationDegrees)
-                .apply()
-
-            return mapOf(
+            val mediaConfig = mapOf(
                 "displayId" to displayId,
                 "imageUri" to mediaUriString,
                 "mediaUri" to mediaUriString,
@@ -287,8 +218,11 @@ object SecondScreenDisplayController {
                 "mediaName" to mediaName,
                 "sourceUri" to sourceUriString,
                 "scaleMode" to scaleMode,
-                "rotationDegrees" to rotationDegrees
+                "rotationDegrees" to rotationDegrees,
+                "isShowing" to true
             )
+            currentMediaConfig = mediaConfig
+            return mediaConfig
         } catch (error: WindowManager.InvalidDisplayException) {
             Log.e(TAG, "Invalid display for presentation", error)
             throw SecondScreenDisplayException(
@@ -317,10 +251,7 @@ object SecondScreenDisplayController {
         val presentation = currentPresentation
         currentPresentation = null
         presentation?.dismiss()
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(PREF_IS_SHOWING, false)
-            .apply()
+        currentMediaConfig = null
         return true
     }
 

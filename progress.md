@@ -105,3 +105,53 @@
 - `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：后台服务状态版本展示更新到 `版本 1.2.6 (15)`。
 - `progress.md`：记录本轮发版准备、验证和回滚方式。
 - 回滚方式：回退本轮版本号修改，或删除 `v1.2.6` tag 并回到上一版 `v1.2.5` 发布产物。
+
+## 2026-09-04 - Task: 开机仅自启后台服务
+
+### What was done
+
+- 移除开机启动时恢复上一次图片或视频的逻辑，避免启动阶段读取本地媒体或下载网络媒体导致卡死。
+- 移除图片、视频及显示状态的持久化保存，显示状态改为仅保留在当前进程内。
+- 保留开机启动前台服务和监听 `9999` 端口的能力。
+- 更新后台服务文档，明确开机不会自动加载上一次媒体。
+
+### Testing
+
+- `flutter analyze`：通过，No issues found。
+- `flutter test`：通过，All tests passed。
+- `flutter build apk --release`：通过，生成 `build/app/outputs/flutter-apk/app-release.apk`。
+- 真机重启后确认不显示主界面、不加载旧媒体，并确认 `9999` 端口仍可访问。
+
+### Notes
+
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：移除开机恢复媒体逻辑。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/SecondScreenDisplayController.kt`：移除媒体持久化，改为进程内保存当前显示状态。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/MainActivity.kt`：移除本地媒体配置保存和旧配置兜底读取。
+- `README.md`：说明开机不会恢复上一次媒体。
+- `docs/background-service.md`：补充后台服务不恢复旧媒体的运行说明。
+- `progress.md`：记录本轮改动、验证计划和回滚方式。
+- 回滚方式：恢复 `ControlHttpService` 的启动恢复调用和 `SecondScreenDisplayController` 的 `SharedPreferences` 媒体持久化逻辑；如需完整回滚，可回退本轮提交。
+
+## 2026-09-04 - Task: 开机仅自启服务发版
+
+### What was done
+
+- 将版本更新到 `1.2.7+16`，用于发布开机启动稳定性修复版本。
+- 保留开机启动前台服务和监听 `9999` 端口，不再恢复或加载上一次显示的媒体。
+
+### Testing
+
+- `flutter analyze`：通过，No issues found。
+- `flutter test`：通过，All tests passed。
+- `flutter build apk --release`：通过，生成 `build/app/outputs/flutter-apk/app-release.apk`。
+- 真机重启后确认不显示主界面、不加载旧媒体，并确认 `9999` 端口仍可访问。
+
+### Notes
+
+- `pubspec.yaml`：发版号更新到 `1.2.7+16`。
+- `lib/main.dart`：页面底部版本展示更新到 `版本 1.2.7 (16)`。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：后台服务状态版本展示更新到 `版本 1.2.7 (16)`。
+- `README.md`：说明开机不会恢复上一次媒体。
+- `docs/background-service.md`：补充后台服务不恢复旧媒体的运行说明。
+- `progress.md`：记录本轮发版准备、验证和回滚方式。
+- 回滚方式：回退本轮提交，或恢复 `v1.2.6` 发布产物。

@@ -28,6 +28,7 @@ The app must be able to boot without showing the Flutter UI and still keep the H
 ## Operational notes
 
 - A persistent Android notification is expected and required for reliable long-running background listening.
+- Boot startup only starts the service and the listener; it does not restore or load the previously shown image or video.
 - The service still requires the device network to allow callers to reach port `9999`.
 - Media URLs must be directly reachable from the Android device.
 - Some vendor ROMs may still require enabling app auto-start or disabling battery optimization for maximum reliability.
