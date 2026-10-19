@@ -5,7 +5,9 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -31,6 +33,13 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "getDisplays" -> result.success(SecondScreenDisplayController.getDisplays(applicationContext))
                 "getSavedConfig" -> result.success(SecondScreenDisplayController.getSavedConfig(applicationContext))
+                "setSelectedDisplay" -> {
+                    SecondScreenDisplayController.setSelectedDisplayId(
+                        applicationContext,
+                        (call.arguments as? Map<*, *>)?.get("displayId").asInt()
+                    )
+                    result.success(true)
+                }
                 "getControlServiceStatus" -> result.success(ControlHttpService.serviceStatus(applicationContext))
                 "startControlService" -> {
                     ControlHttpService.start(this)
@@ -161,9 +170,29 @@ class MainActivity : FlutterActivity() {
             )
             result.success(response)
         } catch (error: SecondScreenDisplayException) {
+            if (error.code == SecondScreenDisplayController.OVERLAY_PERMISSION_ERROR) {
+                openOverlayPermissionSettings()
+            }
             result.error(error.code, error.message, error.details)
         } catch (error: Exception) {
             result.error("SHOW_FAILED", "副屏显示失败", error.message)
+        }
+    }
+
+    private fun openOverlayPermissionSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return
+        }
+
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        } catch (_: ActivityNotFoundException) {
+            // Some vendor builds hide this page; grant it with `adb shell appops` instead.
         }
     }
 

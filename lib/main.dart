@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.2.7 (16)';
+const appVersionLabel = '版本 1.2.8-beta.1 (17)';
 const httpControlPort = 9999;
 
 void main() {
@@ -55,9 +55,6 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   bool _isShowing = false;
   String? _status;
   final List<String> _logs = [];
-
-  List<DeviceDisplay> get _secondaryDisplays =>
-      _displays.where((display) => !display.isDefault).toList(growable: false);
 
   @override
   void initState() {
@@ -203,10 +200,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
           ..clear()
           ..addAll(displays);
         _selectedDisplayId = _resolveDisplayId(_selectedDisplayId);
-        if (_selectedDisplayId == null && _secondaryDisplays.isNotEmpty) {
-          _selectedDisplayId = _secondaryDisplays.first.id;
-        }
-        _status = _secondaryDisplays.isEmpty ? '没有检测到副屏' : null;
+        _status = _displays.isEmpty ? '没有检测到屏幕' : null;
       });
       _addLog(
         '屏幕：${displays.map((display) => display.debugLabel).join(' | ')}',
@@ -223,16 +217,32 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
   }
 
   int? _resolveDisplayId(int? preferredId) {
-    if (_secondaryDisplays.isEmpty) {
-      return null;
-    }
-
     if (preferredId != null &&
-        _secondaryDisplays.any((display) => display.id == preferredId)) {
+        _displays.any((display) => display.id == preferredId)) {
       return preferredId;
     }
 
-    return _secondaryDisplays.first.id;
+    for (final display in _displays) {
+      if (!display.isDefault) {
+        return display.id;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _selectDisplay(int? displayId) async {
+    setState(() {
+      _selectedDisplayId = displayId;
+    });
+    _addLog('选择屏幕：display=$displayId');
+
+    try {
+      await _channel.invokeMethod<bool>('setSelectedDisplay', {
+        'displayId': displayId,
+      });
+    } on PlatformException catch (error) {
+      _handlePlatformError('保存屏幕选择失败', error);
+    }
   }
 
   Future<void> _startControlService() async {
@@ -415,9 +425,9 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
     final effectiveSourceUri = sourceUri ?? mediaUri;
 
     if (targetDisplayId == null) {
-      _addLog('显示失败：未选择副屏');
-      _setStatus('请先连接并选择副屏');
-      throw StateError('请先连接并选择副屏');
+      _addLog('显示失败：未选择目标屏幕');
+      _setStatus('请先选择目标屏幕');
+      throw StateError('请先选择目标屏幕');
     }
 
     if (mediaUri == null || mediaUri.isEmpty) {
@@ -598,7 +608,7 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
                 _StatusPanel(
                   isShowing: _isShowing,
                   status: _status,
-                  secondaryDisplayCount: _secondaryDisplays.length,
+                  displayCount: _displays.length,
                 ),
                 const SizedBox(height: 12),
                 _Section(
@@ -663,34 +673,32 @@ class _DisplayControlPageState extends State<DisplayControlPage> {
                 ),
                 const SizedBox(height: 12),
                 _Section(
-                  title: '副屏',
+                  title: '屏幕',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (_secondaryDisplays.isEmpty)
-                        const Text('未检测到扩展屏。请确认系统不是镜像模式，并检查 HDMI/屏幕连接。')
+                      if (_displays.isEmpty)
+                        const Text('未检测到屏幕。请检查 HDMI/屏幕连接。')
                       else
                         DropdownButtonFormField<int>(
                           initialValue: _selectedDisplayId,
+                          isExpanded: true,
                           decoration: const InputDecoration(
                             border: OutlineInputBorder(),
                             labelText: '目标屏幕',
                           ),
-                          items: _secondaryDisplays
+                          items: _displays
                               .map(
                                 (display) => DropdownMenuItem<int>(
                                   value: display.id,
-                                  child: Text(display.title),
+                                  child: Text(
+                                    display.title,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
                               )
                               .toList(growable: false),
-                          onChanged: _isLoading
-                              ? null
-                              : (value) {
-                                  setState(() {
-                                    _selectedDisplayId = value;
-                                  });
-                                },
+                          onChanged: _isLoading ? null : _selectDisplay,
                         ),
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
@@ -848,15 +856,15 @@ class DeviceDisplay {
     };
   }
 
+  String get _defaultMark => isDefault ? '（系统默认屏）' : '';
+
   String get title {
-    final role = isPresentation ? '副屏' : '扩展屏';
     final size = width > 0 && height > 0 ? ' $width x $height' : '';
-    return '$role #$id - $name$size';
+    return '屏幕 #$id - $name$size$_defaultMark';
   }
 
   String get debugLabel {
-    final role = isDefault ? '主屏' : (isPresentation ? '副屏' : '扩展屏');
-    return '$role#$id "$name" ${width}x$height dpi=$densityDpi';
+    return '屏幕#$id "$name" ${width}x$height dpi=$densityDpi$_defaultMark';
   }
 }
 
@@ -905,18 +913,18 @@ class _StatusPanel extends StatelessWidget {
   const _StatusPanel({
     required this.isShowing,
     required this.status,
-    required this.secondaryDisplayCount,
+    required this.displayCount,
   });
 
   final bool isShowing;
   final String? status;
-  final int secondaryDisplayCount;
+  final int displayCount;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final statusText =
-        status ?? (secondaryDisplayCount > 0 ? '已检测到副屏' : '等待连接副屏');
+        status ?? (displayCount > 0 ? '已检测到 $displayCount 块屏幕' : '等待检测屏幕');
 
     return Container(
       padding: const EdgeInsets.all(16),

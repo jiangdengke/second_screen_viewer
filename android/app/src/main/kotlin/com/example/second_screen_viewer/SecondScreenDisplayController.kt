@@ -1,5 +1,6 @@
 package com.example.second_screen_viewer
 
+import android.annotation.SuppressLint
 import android.app.Presentation
 import android.content.Context
 import android.graphics.Bitmap
@@ -8,17 +9,21 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.display.DisplayManager
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -49,10 +54,13 @@ class SecondScreenDisplayException(
 ) : Exception(message)
 
 object SecondScreenDisplayController {
+    const val OVERLAY_PERMISSION_ERROR = "OVERLAY_PERMISSION"
     private const val TAG = "SecondScreenViewer"
+    private const val PREFS_NAME = "second_screen_viewer"
+    private const val PREF_SELECTED_DISPLAY_ID = "selectedDisplayId"
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var currentPresentation: SecondScreenMediaPresentation? = null
+    private var currentMediaWindow: SecondScreenMediaWindow? = null
 
     @Volatile
     private var currentMediaConfig: Map<String, Any?>? = null
@@ -78,10 +86,32 @@ object SecondScreenDisplayController {
     }
 
     fun getSavedConfig(context: Context): Map<String, Any?> {
-        return currentMediaConfig ?: emptyMediaConfig()
+        return currentMediaConfig ?: emptyMediaConfig(context)
     }
 
-    private fun emptyMediaConfig(): Map<String, Any?> {
+    fun setSelectedDisplayId(context: Context, displayId: Int?) {
+        val editor = preferences(context).edit()
+        if (displayId == null) {
+            editor.remove(PREF_SELECTED_DISPLAY_ID)
+        } else {
+            editor.putInt(PREF_SELECTED_DISPLAY_ID, displayId)
+        }
+        editor.apply()
+    }
+
+    private fun selectedDisplayId(context: Context): Int? {
+        val prefs = preferences(context)
+        return if (prefs.contains(PREF_SELECTED_DISPLAY_ID)) {
+            prefs.getInt(PREF_SELECTED_DISPLAY_ID, Display.DEFAULT_DISPLAY)
+        } else {
+            null
+        }
+    }
+
+    private fun preferences(context: Context) =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun emptyMediaConfig(context: Context): Map<String, Any?> {
         return mapOf(
             "imageUri" to null,
             "imageName" to null,
@@ -90,24 +120,20 @@ object SecondScreenDisplayController {
             "mediaType" to null,
             "mediaMimeType" to "",
             "sourceUri" to null,
-            "displayId" to null,
+            "displayId" to selectedDisplayId(context),
             "scaleMode" to "centerCrop",
             "rotationDegrees" to 0,
             "isShowing" to false
         )
     }
 
+    // 优先用请求里的 displayId，其次用页面上保存的选择，都没有时用第一块非系统默认屏。
     fun resolveDisplayId(context: Context, preferredId: Int?): Int? {
-        val secondaryDisplays = getSecondaryDisplays(context)
-        if (secondaryDisplays.isEmpty()) {
-            return null
-        }
-
-        if (preferredId != null && secondaryDisplays.any { it.displayId == preferredId }) {
-            return preferredId
-        }
-
-        return secondaryDisplays.first().displayId
+        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val displays = displayManager.displays
+        return listOfNotNull(preferredId, selectedDisplayId(context))
+            .firstOrNull { id -> displays.any { it.displayId == id } }
+            ?: displays.firstOrNull { it.displayId != Display.DEFAULT_DISPLAY }?.displayId
     }
 
     fun showMedia(
@@ -172,7 +198,7 @@ object SecondScreenDisplayController {
         val displayId = resolveDisplayId(context, request.displayId)
 
         if (displayId == null) {
-            throw SecondScreenDisplayException("NO_DISPLAY", "请选择副屏")
+            throw SecondScreenDisplayException("NO_DISPLAY", "请选择目标屏幕")
         }
 
         if (mediaUriString.isNullOrBlank()) {
@@ -184,31 +210,33 @@ object SecondScreenDisplayController {
             throw SecondScreenDisplayException("DISPLAY_NOT_FOUND", "找不到 Display $displayId")
         }
 
-        val presentation = SecondScreenMediaPresentation(
+        val mediaWindow = createMediaWindow(
             context,
             display,
-            Uri.parse(mediaUriString),
-            mediaType,
-            scaleMode,
-            rotationDegrees,
-            displayId,
-            onEvent
+            MediaViewSpec(
+                Uri.parse(mediaUriString),
+                mediaType,
+                scaleMode,
+                rotationDegrees,
+                displayId,
+                onEvent
+            )
         )
-        presentation.setOnDismissListener {
-            if (currentPresentation === presentation) {
-                currentPresentation = null
+        mediaWindow.setOnDismissed {
+            if (currentMediaWindow === mediaWindow) {
+                currentMediaWindow = null
                 currentMediaConfig = null
                 onEvent(mapOf("type" to "presentationDismissed", "displayId" to displayId))
             }
         }
 
         try {
-            val previousPresentation = currentPresentation
-            currentPresentation = null
+            val previousMediaWindow = currentMediaWindow
+            currentMediaWindow = null
             currentMediaConfig = null
-            previousPresentation?.dismiss()
-            presentation.show()
-            currentPresentation = presentation
+            previousMediaWindow?.dismiss()
+            mediaWindow.show()
+            currentMediaWindow = mediaWindow
 
             val mediaConfig = mapOf(
                 "displayId" to displayId,
@@ -248,17 +276,33 @@ object SecondScreenDisplayController {
     }
 
     private fun hideMediaOnMain(context: Context): Boolean {
-        val presentation = currentPresentation
-        currentPresentation = null
-        presentation?.dismiss()
+        val mediaWindow = currentMediaWindow
+        currentMediaWindow = null
+        mediaWindow?.dismiss()
         currentMediaConfig = null
         return true
     }
 
-    private fun getSecondaryDisplays(context: Context): List<Display> {
-        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        return displayManager.displays
-            .filter { display -> display.displayId != Display.DEFAULT_DISPLAY }
+    // Presentation 只能放在带 FLAG_PRESENTATION 的屏上（display 0 没有），其余屏改用悬浮窗。
+    private fun createMediaWindow(
+        context: Context,
+        display: Display,
+        spec: MediaViewSpec,
+    ): SecondScreenMediaWindow {
+        val isPublicPresentation =
+            (display.flags and (Display.FLAG_PRESENTATION or Display.FLAG_PRIVATE)) ==
+                Display.FLAG_PRESENTATION
+        if (isPublicPresentation) {
+            return SecondScreenMediaPresentation(context, display, spec)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+            throw SecondScreenDisplayException(
+                OVERLAY_PERMISSION_ERROR,
+                "播放到 Display ${display.displayId} 需要开启“显示在其他应用上层”权限"
+            )
+        }
+        return SecondScreenMediaOverlay(context.applicationContext, display, spec)
     }
 
     private fun contentTypeForUri(context: Context, mediaUriString: String?): String? {
@@ -308,40 +352,22 @@ object SecondScreenDisplayController {
     }
 }
 
-private class SecondScreenMediaPresentation(
-    context: Context,
-    display: Display,
-    private val mediaUri: Uri,
-    private val mediaType: String,
-    private val scaleMode: String,
-    private val rotationDegrees: Int,
-    private val displayId: Int,
-    private val onEvent: (Map<String, Any?>) -> Unit,
-) : Presentation(context, display) {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        super.onCreate(savedInstanceState)
+private interface SecondScreenMediaWindow {
+    fun show()
+    fun dismiss()
+    fun setOnDismissed(listener: () -> Unit)
+}
 
-        window?.setFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN,
-            WindowManager.LayoutParams.FLAG_FULLSCREEN
-        )
-        window?.setLayout(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT
-        )
-        window?.setBackgroundDrawableResource(android.R.color.black)
-
-        @Suppress("DEPRECATION")
-        window?.decorView?.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-
-        val root = FrameLayout(context).apply {
+private class MediaViewSpec(
+    val mediaUri: Uri,
+    val mediaType: String,
+    val scaleMode: String,
+    val rotationDegrees: Int,
+    val displayId: Int,
+    val onEvent: (Map<String, Any?>) -> Unit,
+) {
+    fun createRootView(context: Context): FrameLayout {
+        return FrameLayout(context).apply {
             setBackgroundColor(Color.BLACK)
             if (mediaType == "video") {
                 addView(
@@ -377,8 +403,125 @@ private class SecondScreenMediaPresentation(
                 )
             }
         }
+    }
+}
 
-        setContentView(root)
+private class SecondScreenMediaOverlay(
+    context: Context,
+    display: Display,
+    private val spec: MediaViewSpec,
+) : SecondScreenMediaWindow {
+    private companion object {
+        const val CLOSE_PRESS_MS = 3000L
+    }
+
+    private val windowContext = createOverlayContext(context, display)
+    private val windowManager = windowContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val handler = Handler(Looper.getMainLooper())
+    private val closeRunnable = Runnable { dismiss() }
+    private var rootView: View? = null
+    private var onDismissed: (() -> Unit)? = null
+
+    override fun show() {
+        val root = spec.createRootView(windowContext)
+        closeOnLongPress(root)
+        windowManager.addView(root, overlayLayoutParams())
+        rootView = root
+    }
+
+    override fun dismiss() {
+        val root = rootView ?: return
+        rootView = null
+        handler.removeCallbacks(closeRunnable)
+        try {
+            windowManager.removeView(root)
+        } catch (_: IllegalArgumentException) {
+            // The window is already gone, for example after its display was removed.
+        }
+        onDismissed?.invoke()
+    }
+
+    override fun setOnDismissed(listener: () -> Unit) {
+        onDismissed = listener
+    }
+
+    // 悬浮窗会盖住同一块屏上的 App 界面，按住 3 秒可以关闭，避免现场无法操作。
+    @SuppressLint("ClickableViewAccessibility")
+    private fun closeOnLongPress(root: View) {
+        root.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> handler.postDelayed(closeRunnable, CLOSE_PRESS_MS)
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> handler.removeCallbacks(closeRunnable)
+            }
+            true
+        }
+    }
+
+    private fun createOverlayContext(context: Context, display: Display): Context {
+        val displayContext = context.createDisplayContext(display)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            displayContext.createWindowContext(overlayWindowType(), null)
+        } else {
+            displayContext
+        }
+    }
+
+    private fun overlayLayoutParams(): WindowManager.LayoutParams {
+        return WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            PixelFormat.OPAQUE
+        )
+    }
+
+    private fun overlayWindowType(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+    }
+}
+
+private class SecondScreenMediaPresentation(
+    context: Context,
+    display: Display,
+    private val spec: MediaViewSpec,
+) : Presentation(context, display), SecondScreenMediaWindow {
+    override fun setOnDismissed(listener: () -> Unit) {
+        setOnDismissListener { listener() }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        requestWindowFeature(Window.FEATURE_NO_TITLE)
+        super.onCreate(savedInstanceState)
+
+        window?.setFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+        window?.setLayout(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT
+        )
+        window?.setBackgroundDrawableResource(android.R.color.black)
+
+        @Suppress("DEPRECATION")
+        window?.decorView?.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+
+        setContentView(spec.createRootView(context))
     }
 }
 

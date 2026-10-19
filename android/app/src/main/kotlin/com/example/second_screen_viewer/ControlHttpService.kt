@@ -38,7 +38,7 @@ class ControlHttpService : Service() {
     companion object {
         const val CONTROL_PORT = 9999
         private const val TAG = "SecondScreenViewer"
-        private const val APP_VERSION_LABEL = "版本 1.2.7 (16)"
+        private const val APP_VERSION_LABEL = "版本 1.2.8-beta.1 (17)"
         private const val NOTIFICATION_CHANNEL_ID = "second_screen_control"
         private const val NOTIFICATION_ID = 1001
 
@@ -468,6 +468,9 @@ class ControlHttpService : Service() {
         val type = event["type"]?.toString() ?: "unknown"
         val message = event["message"]?.toString()
         lastServiceMessage = if (message.isNullOrEmpty()) type else "$type：$message"
+        if (type == "presentationDismissed") {
+            stopImageSlideshow(clearCache = true)
+        }
         if (type == "videoError") {
             Log.e(TAG, "Presentation event: $event")
         } else {

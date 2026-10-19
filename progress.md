@@ -155,3 +155,31 @@
 - `docs/background-service.md`：补充后台服务不恢复旧媒体的运行说明。
 - `progress.md`：记录本轮发版准备、验证和回滚方式。
 - 回滚方式：回退本轮提交，或恢复 `v1.2.6` 发布产物。
+
+## 2026-10-19 - Task: 检测并选择所有屏幕（1.2.8-beta.1）
+
+### What was done
+
+- 页面列出检测到的所有屏幕，包括系统默认屏（display 0），每块屏都可以选择。
+- 页面上选择的屏幕保存到 `SharedPreferences`，HTTP 请求不传 `displayId` 时使用它；从未选择时使用第一块非系统默认屏。
+- 带 `FLAG_PRESENTATION` 的屏继续用 `Presentation`；display 0 等其他屏改用悬浮窗显示，需要“显示在其他应用上层”权限。
+- 悬浮窗按住 3 秒可以关闭；悬浮窗或 Presentation 被外部关闭时，后台服务停止图片轮播。
+- 版本更新到 `1.2.8-beta.1+17`，`-` 后缀的标签在 GitHub Release 中标为预发布版本。
+
+### Testing
+
+- `flutter analyze`：通过，No issues found。
+- `flutter test`：通过，All tests passed。
+- `flutter build apk --release`：通过。
+- 真机待验证：选择 display 0 播放视频和图片、按住 3 秒关闭、不传 `displayId` 的 HTTP 请求使用页面选择的屏幕。
+
+### Notes
+
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/SecondScreenDisplayController.kt`：保存屏幕选择，新增悬浮窗显示方式。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/MainActivity.kt`：新增 `setSelectedDisplay`，缺少悬浮窗权限时打开设置页。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：显示窗口被外部关闭时停止图片轮播。
+- `android/app/src/main/AndroidManifest.xml`：声明 `SYSTEM_ALERT_WINDOW`。
+- `lib/main.dart`：屏幕列表显示全部屏幕，选择后保存。
+- `.github/workflows/android-release.yml`：带 `-` 后缀的标签发布为预发布版本。
+- `README.md`：说明屏幕选择规则和悬浮窗授权方法。
+- 回滚方式：回退本轮提交，或恢复 `v1.2.7` 发布产物。
