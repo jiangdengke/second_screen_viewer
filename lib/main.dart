@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-const appVersionLabel = '版本 1.3.0-beta.1 (18)';
+const appVersionLabel = '版本 1.3.0-beta.2 (19)';
 const httpControlPort = 9999;
 
 void main() {

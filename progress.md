@@ -239,3 +239,23 @@
 - 安装预发布 APK 后先通过 HTTP 成功显示一张图片，再重启验证两分钟后的离线缓存恢复。
 - 回滚使用已发布旧版本 APK；新版本的独立私有缓存无需手动删除，旧版本不会加载它。
 - 远端发布状态以 GitHub Release 页面及 Actions 结果为准。
+
+## 2026-11-18 - Task: 固定构建工具链并发布 v1.3.0-beta.2
+
+### What was done
+
+- 首次已推送的 `v1.3.0-beta.1` 在 GitHub Analyze 阶段失败：未固定的 `stable` 选择 Flutter `3.50.0`，对既有 `package:flutter/material.dart` 导入报弃用提示；没有生成 GitHub Release 或 APK。
+- 将 CI 和 APK 发布流程同时固定为本地验证通过的 Flutter `3.44.1`，避免远端工具链自动漂移。不关闭分析规则，不在发版过程中迁移 UI 依赖。
+- 使用新预发布标签 `v1.3.0-beta.2`，应用版本同步为 `1.3.0-beta.2+19`；不覆盖或强推已发布的 beta.1 标签。
+- 本次保留相同的延迟缓存恢复功能，新增的工具链固定不改变 HTTP 或播放行为。正式版本仍需真机验收后另行发布。
+
+### Testing
+
+- Flutter `3.44.1` 下再次执行 `flutter analyze && flutter test && flutter build apk --release && ./android/gradlew -p android :app:testDebugUnitTest && git diff --check`：全部通过。
+- Flutter 测试 3 项、原生测试 30 项通过，beta.2 release APK 本地构建成功。
+- GitHub 发布将重新运行固定版本下的分析、测试和 APK 构建；不把本地验证结果代替远端发布结果。
+
+### Notes
+
+- 保留失败运行 `44243053535` 和原标签作为历史，后续通过新标签验证工具链修复。
+- 仍未验证 RK3588 真机重启和长期空闲稳定性，不宣称进程异常退出已修复。

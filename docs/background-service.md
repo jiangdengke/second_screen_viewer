@@ -51,7 +51,11 @@ Only successful attachment enqueues manifest publication, in successful display 
 
 If copying or publishing durable storage fails, a usable new image can remain visible while the old durable pointer remains the reboot fallback. An adopted bitmap belongs to the image view until detach; failed/stale work releases its own resources and a later publication failure must never recycle a bitmap still on screen. Local Activity file selection is not saved as the HTTP fallback.
 
-Once an attempt is consumed, a crash before display intentionally skips fallback for the rest of that boot. A crash after a successful display but before publication may retain the previous fallback. This is best-effort display continuity, not a fix or diagnosis for the previously unconfirmed idle process exit. The service type is unchanged. The feature is first published in prerelease `1.3.0-beta.1+18`.
+Once an attempt is consumed, a crash before display intentionally skips fallback for the rest of that boot. A crash after a successful display but before publication may retain the previous fallback. This is best-effort display continuity, not a fix or diagnosis for the previously unconfirmed idle process exit. The service type is unchanged. The feature is first published in prerelease `1.3.0-beta.2+19`; the earlier beta.1 tag did not produce a release because its CI toolchain had drifted.
+
+## Build toolchain
+
+CI and APK release workflows pin Flutter `3.44.1`, matching the locally validated toolchain. Tracking unpinned `stable` selected Flutter `3.50.0` and failed analysis on the existing Material import deprecation. Upgrade Flutter deliberately with UI/dependency migration and full checks rather than suppressing analyzer diagnostics during release.
 
 ## Verification and target-device checklist
 
