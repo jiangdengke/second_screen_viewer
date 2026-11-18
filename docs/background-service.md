@@ -14,6 +14,18 @@ The app must be able to boot without showing the Flutter UI and still keep the H
 6. An armed deadline is 120 seconds after that broadcast, not kernel boot or service creation. When due, the service durably claims one attempt before reading the local cached image. `Handler` delivery is best effort: sleep or main-queue contention can make it late, and no exact alarm or periodic retry is added.
 7. HTTP media commands call `SecondScreenDisplayController`, which owns `Presentation` or permission-checked overlay playback. Prepared HTTP/boot images are copied and sampled/decoded off main; main only validates their lease and attaches the window.
 
+## Android 15 foreground-service compatibility
+
+The ongoing, user-visible LAN display controller uses the `specialUse` foreground-service type, `FOREGROUND_SERVICE_SPECIAL_USE`, and a `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` explaining the dedicated-device command-listening use case. The general `FOREGROUND_SERVICE` permission and persistent notification remain required. Existing two-argument `startForeground` calls obtain the service type from the manifest; no new lifecycle or media scheduling path is added.
+
+The earlier `dataSync` declaration was incompatible with boot startup on Android 15 when targeting API 35 or higher (beta.2 targets API 36). Android prohibits launching that type from `BOOT_COMPLETED` and can throw `ForegroundServiceStartNotAllowedException` immediately. The 120-second image deadline does not delay service startup and cannot avoid that restriction. This is distinct from the six-hour data-sync runtime limit.
+
+The correction is included in prerelease `1.3.0-beta.3+20`. The previously published beta.2 APK still uses the old declaration; reinstalling it does not apply this repair. The prerelease channel is retained because RK3588 Android 15 reboot acceptance is still pending.
+
+`specialUse` describes this controller's actual ongoing purpose, not a general keepalive exemption. If distributed through Google Play, its declared use case is subject to review. Do not substitute `mediaPlayback` (also boot-restricted), claim `systemExempted` without the required entitlement, lower target SDK, or treat caught startup errors as a functioning listener. OEM policy and unrelated crashes still need device evidence.
+
+References: [Android 15 boot restrictions](https://developer.android.com/about/versions/15/behavior-changes-15#fgs-boot-completed), [special-use requirements](https://developer.android.com/develop/background-work/services/fgs/service-types#special-use).
+
 ## UI flow
 
 `MainActivity` is now optional. Opening the app starts or refreshes the service status through the MethodChannel, but the Flutter page does not bind port `9999` anymore. This avoids a port conflict between the UI and the background service.
@@ -51,7 +63,7 @@ Only successful attachment enqueues manifest publication, in successful display 
 
 If copying or publishing durable storage fails, a usable new image can remain visible while the old durable pointer remains the reboot fallback. An adopted bitmap belongs to the image view until detach; failed/stale work releases its own resources and a later publication failure must never recycle a bitmap still on screen. Local Activity file selection is not saved as the HTTP fallback.
 
-Once an attempt is consumed, a crash before display intentionally skips fallback for the rest of that boot. A crash after a successful display but before publication may retain the previous fallback. This is best-effort display continuity, not a fix or diagnosis for the previously unconfirmed idle process exit. The service type is unchanged. The feature is first published in prerelease `1.3.0-beta.2+19`; the earlier beta.1 tag did not produce a release because its CI toolchain had drifted.
+Once an attempt is consumed, a crash before display intentionally skips fallback for the rest of that boot. A crash after a successful display but before publication may retain the previous fallback. This is best-effort display continuity, not a fix or diagnosis for the previously unconfirmed idle process exit. The fallback feature is first published in prerelease `1.3.0-beta.2+19`; the earlier beta.1 tag did not produce a release because its CI toolchain had drifted. The subsequent Android 15 service-type correction is separate from image restoration and still requires a genuine target-device reboot test.
 
 ## Build toolchain
 
@@ -59,6 +71,8 @@ CI and APK release workflows pin Flutter `3.44.1`, matching the locally validate
 
 ## Verification and target-device checklist
 
-Host checks: `cd android && ./gradlew :app:testDebugUnitTest`, `flutter analyze`, `flutter test`, `flutter build apk --release`, and `git diff --check`. JVM tests exercise the actual pure boot ledger, command gate and store with injected copy/publication failures; they do not execute Android `BitmapFactory`, `AtomicFile`, overlays or `Presentation`.
+Host checks: `cd android && ./gradlew :app:testDebugUnitTest :app:lintRelease`, `flutter analyze`, `flutter test`, `flutter build apk --release`, and `git diff --check`. The manifest regression test checks the actual source declaration, matching foreground-service permissions and nonempty special-use subtype. Also inspect the final APK manifest using the Android SDK's `apkanalyzer manifest print` to confirm the packaged service type, permission and subtype. JVM tests exercise the actual pure boot ledger, command gate and store with injected copy/publication failures; they do not execute Android `BitmapFactory`, `AtomicFile`, overlays or `Presentation`.
+
+For Android 15 boot acceptance, use an APK signed with the same key as the installed app and install without clearing data (`adb install -r build/app/outputs/flutter-apk/app-release.apk`), then genuinely reboot without opening the app. A signing-key mismatch may reject replacement; do not uninstall merely to bypass it before preserving evidence and cache. Before the image deadline, verify the persistent notification, `adb shell dumpsys activity services com.example.second_screen_viewer`, and `GET http://<device-ip>:9999/api/status`. If startup or idle exit persists, capture `adb logcat -b all -d -v threadtime` and `adb shell dumpsys activity exit-info com.example.second_screen_viewer` before another reboot/reinstall; preserve the exact exception or system exit reason instead of inferring it from the missing UI.
 
 On RK3588, save a known image/settings, reboot without opening the app, confirm port `9999` is available during the grace period and no media/UI appears before the deadline, then confirm one local-only image appears. Repeat with a malformed recognized request, new image/video, local show/hide and long-press dismissal before/during restore; none may be overwritten. Kill/recreate the process before and after cancellation/consumption and verify the original deadline and terminal state survive. Check multiple slides, invalid image and attachment failures, removed/reassigned displays, absent overlay permission, corrupt/missing cache, BOOT_COUNT availability and cold/power-loss durability. Android display IDs may be reassigned across boots; missing IDs are skipped, not remapped to another screen.

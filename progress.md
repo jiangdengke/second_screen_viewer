@@ -259,3 +259,71 @@
 
 - 保留失败运行 `44243053535` 和原标签作为历史，后续通过新标签验证工具链修复。
 - 仍未验证 RK3588 真机重启和长期空闲稳定性，不宣称进程异常退出已修复。
+
+## 2026-11-18 - Task: 修复 Android 15 开机前台服务类型不兼容
+
+### What was done
+
+- 用户确认设备为 Android 15 并批准修复。将专用设备常驻 HTTP 控制服务从开机受限的 `dataSync` 改为 `specialUse`，声明对应权限和实际用途，移除不再使用的数据同步服务权限。
+- 保留无界面自启、常驻通知、`9999` 监听和两分钟本地图片兜底；不修改运行时 Kotlin、HTTP 协议、线程、媒体处理、目标 SDK 或版本号。
+- 新增读取实际源码 manifest 的单项回归测试；同步使用说明、系统限制与验证边界，避免把图片等待或捕获异常当作服务已可用。
+- 本轮只完成本地修复与构建，不提交、不推送、不打标签、不发布。GitHub 上现有 beta.2 仍是旧包，本地修复包仍标识 `1.3.0-beta.2+19`。
+
+### Testing
+
+- 修复前执行 `./android/gradlew -p android :app:testDebugUnitTest --tests '*ControlServiceManifestTest'`，按预期失败：`expected:<specialUse> but was:<dataSync>`。
+- 修复后 `./android/gradlew -p android :app:testDebugUnitTest` 通过；结果 XML 确认 31 项测试、0 失败、0 错误、0 跳过。
+- `flutter analyze && flutter test` 通过，Flutter 测试 3 项。
+- `flutter build apk --release && ./android/gradlew -p android :app:lintRelease` 通过；Android lint 保留既有升级、版本判断和视图/KTX 建议，没有为本轮关闭规则或扩展清理。
+- 使用 `apkanalyzer manifest print` 校验最终 APK：目标 API 36；服务类型 `0x40000000`（specialUse）；通用及 special-use 权限、非空用途存在；不再包含 data-sync 权限。
+- 编辑文件 IDE 诊断为空；`git diff --check` 通过；决策笔记目录、格式和归档校验通过。独立定向复核未发现可操作缺陷。
+- 本机 Android 15 模拟器尝试以临时只读、无界面模式启动，但没有获得可用设备；`adb devices -l` 仍为空。未完成模拟器或 RK3588 真正重启、端口存活和延迟图片恢复验收；缺少现场退出日志，不能宣称所有异常退出已解决。
+- 本地 APK：`build/app/outputs/flutter-apk/app-release.apk`；SHA-256：`a2539cec94bf8099abd3419848c783b0dc7bb121d494900383ac42dd8203b2e0`。
+
+### Notes
+
+- `android/app/src/main/AndroidManifest.xml`：修正服务类型、匹配权限与 special-use 用途说明。
+- `android/app/src/test/kotlin/com/example/second_screen_viewer/ControlServiceManifestTest.kt`：验证实际服务声明、权限和非空用途，防止重新使用开机受限类型。
+- `README.md`：增加 Android 15 修复范围和真机验证边界。
+- `docs/background-service.md`：说明类型选择、系统限制、最终 APK 核验、同签名覆盖安装与异常取证步骤。
+- `progress.md`：仅追加本轮修复、验证和回滚证据。
+- `.trellis/spec/backend/image-fallback.md`：补充启动类型契约及声明与真实系统验证分离的要求。
+- `.trellis/tasks/11-18-android15-boot-service/prd.md`：记录已批准范围、主机验收结果与待验证真机项。
+- `.trellis/tasks/11-18-android15-boot-service/implement.jsonl`、`check.jsonl`：分别登记实施和复核所需规范与研究上下文。
+- `.trellis/tasks/11-18-android15-boot-service/task.json`：记录新任务及实施状态；会话任务指针同步到此任务。
+- `.trellis/tasks/11-18-android15-boot-service/research/foreground-service-type.md`：保存官方规则、方案取舍和验证限制。
+- `.trellis/tasks/11-18-android15-boot-service/review.md`：保存独立复核结论和系统级验证缺口。
+- `.agents/notes/implemented/bug-fix/2026-11-18-android15-boot-service.md`：记录本轮类型修复理由、拒绝方案与测试；该目录沿用既有忽略规则。
+- `.agents/notes/implemented/feature/2026-11-18-delayed-cached-image.md`：仅互链启动配置修复，不改写原图片恢复决定。
+- 源码回滚点为 `6946079232c52fe035b4b484a54a81833ad2df1b`。仅撤销本轮应用改动可执行 `git restore --source=6946079232c52fe035b4b484a54a81833ad2df1b -- android/app/src/main/AndroidManifest.xml README.md docs/background-service.md`，再删除本轮新增的 `android/app/src/test/kotlin/com/example/second_screen_viewer/ControlServiceManifestTest.kt` 并重新构建；此回滚会恢复已知 Android 15 启动限制，不应当作修复。进度历史和本地决策记录保留为证据。
+- 安装验收需使用与现有应用相同的签名；若覆盖安装报签名不匹配，不要先卸载而丢失缓存及异常证据。下一步在 Android 15 真机确认通知和 `/api/status` 在两分钟前可用，再验证图片恢复。
+
+## 2026-11-18 - Task: Android 15 开机兼容性修复预发布 v1.3.0-beta.3
+
+### What was done
+
+- 用户明确要求提交、推送和发版，并选择继续预发布，将应用版本同步为 `1.3.0-beta.3+20`。
+- 本次发布包含 Android 15 开机服务类型、配套权限和用途说明修正，以及实际 manifest 的回归测试；保留无界面自启、`9999` 监听和两分钟图片恢复。
+- 提交范围仅限应用修复、版本、测试和使用说明，不纳入本地 `.cursor/`、`.trellis/`、`AGENTS.md`、忽略的决策笔记或构建输出。
+- 新增预发布标签 `v1.3.0-beta.3`，不覆盖历史标签；APK 由 GitHub 发布工作流生成，预发布不替换最新正式版 `v1.2.7`。
+
+### Testing
+
+- 版本同步后执行 `flutter analyze && flutter test && flutter build apk --release && ./android/gradlew -p android :app:testDebugUnitTest :app:lintRelease && git diff --check`：全部通过。
+- Flutter 测试 3 项、原生测试 31 项通过；Android lint 未引入错误，保留既有无关警告。
+- 最终本地 APK 经 `apkanalyzer manifest print` 断言：版本 `1.3.0-beta.3`、build 20、specialUse 类型及对应权限/用途说明有效，data-sync 权限不存在。
+- 修改文件 IDE 诊断为空。本轮没有可用 Android 15/RK3588 设备，真实开机、长期空闲和缓存图片恢复仍待验收；不宣称已解决所有异常退出。
+- GitHub CI、发布工作流和 APK 上传状态以推送后的远端运行结果为准，本段不以本地通过代替远端结果。
+
+### Notes
+
+- `pubspec.yaml`：版本更新到 `1.3.0-beta.3+20`。
+- `lib/main.dart`：界面版本展示同步为 beta.3/build 20。
+- `android/app/src/main/kotlin/com/example/second_screen_viewer/ControlHttpService.kt`：HTTP 状态版本展示同步为 beta.3/build 20。
+- `android/app/src/main/AndroidManifest.xml`：包含上一轮已验证的 Android 15 服务类型与权限修复。
+- `android/app/src/test/kotlin/com/example/second_screen_viewer/ControlServiceManifestTest.kt`：包含上一轮已验证的实际 manifest 回归测试。
+- `README.md`：包含 Android 15 修复范围与验证边界说明。
+- `docs/background-service.md`：明确修复从 beta.3 起提供，旧 beta.2 APK 不包含修复。
+- `progress.md`：追加版本同步、验证和发布范围记录，保留上一轮本地修复历史。
+- `.trellis/tasks/11-18-android15-boot-service/prd.md`：补充用户后续提交/推送/预发布授权；仅保留在本地。
+- 回滚点为上一标签 `v1.3.0-beta.2`（提交 `6946079232c52fe035b4b484a54a81833ad2df1b`）；可在独立目录执行 `git worktree add --detach /tmp/second-screen-viewer-beta2 v1.3.0-beta.2` 后重建旧包，不改动当前工作区或已推送标签。旧包会恢复已知的 Android 15 启动限制，不建议用作 Android 15 故障修复。
