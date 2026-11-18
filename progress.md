@@ -183,3 +183,59 @@
 - `.github/workflows/android-release.yml`：带 `-` 后缀的标签发布为预发布版本。
 - `README.md`：说明屏幕选择规则和悬浮窗授权方法。
 - 回滚方式：回退本轮提交，或恢复 `v1.2.7` 发布产物。
+
+## 2026-11-18 - Task: 开机两分钟后使用最后成功图片兜底
+
+### What was done
+
+- 保留开机不打开主界面、立即启动前台服务监听 `9999` 的路径；真正收到开机完成广播后等待 120 秒，再按条件尝试一次本地图片兜底。
+- 使用开机标识和持久状态记录原截止时间、取消及已尝试状态，避免打开页面、重复启动服务或进程重建重新计时。
+- 图片、视频、本地显示和停止指令优先；识别到图片请求即取消本次开机兜底，即使参数或下载失败也不让旧图随后覆盖新指令。
+- 成功显示的 HTTP 图片独立保存在私有目录；候选图片在工作线程复制和采样解码，新窗口可用后再替换旧画面并原子更新持久缓存。
+- 保留多图轮播，最后成功显示的一张可供下次开机单图兜底；不恢复视频，不在恢复时联网。
+- 增加开机状态、指令竞争和缓存事务的原生 JVM 测试；同步 README、后台服务说明和本地决策记录。
+- 本轮不改版本号、不提交、不推送、不发布；该功能不代表已定位或修复此前空闲异常退出的原因。
+
+### Testing
+
+- `android/` 下 `./gradlew :app:testDebugUnitTest :app:assembleRelease`：首轮通过；复核修正后 `./gradlew :app:testDebugUnitTest :app:compileReleaseKotlin` 再次通过，最终 30 项原生测试无失败。
+- `flutter analyze`：通过，No issues found。
+- `flutter test`：通过，3 项测试。
+- `flutter build apk --release`：通过，生成 `build/app/outputs/flutter-apk/app-release.apk`。
+- 决策记录结构、格式和归档校验：通过；`git diff --check`：通过。
+- 独立代码复核已完成：修正旧窗口关闭/通知与新指令的竞争、主线程投递失败的资源清理、客户端断开时错误响应写入和关闭 socket 的 I/O 异常边界。
+- 图片解码的边界/像素分配失败转换为普通准备错误，保留原始原因；不全局吞掉其他严重错误，也不承诺极端内存耗尽下必然恢复。
+- 所有复核修改后重跑 `flutter analyze && flutter test && flutter build apk --release && git diff --check`：通过，最终 APK 已重新打包，不是复核前的旧产物。
+- `adb devices -l` 无连接设备。真实开机两分钟、显示权限、屏幕 ID 稳定性、Android 解码/原子文件和突然断电恢复仍需 RK3588 真机验证。
+
+### Notes
+
+- `BootCompletedReceiver.kt`、`ControlHttpService.kt`：区分真正开机事件，后台计时并识别新指令。
+- `BootFallbackLedger.kt`、`MediaCommandGate.kt`、`MediaFallbackCoordinator.kt`：持久开机状态、最终显示指令顺序及串行存储工作。
+- `LastGoodImageStore.kt`、`AtomicRecordFile.kt`、`PreparedDisplayImage.kt`、`ImageDecodeAllocation.kt`：不可变图片、原子元数据、位图/文件所有权和解码分配错误边界。
+- `MainActivity.kt`、`SecondScreenDisplayController.kt`：本地播放/停止取消兜底，最终主线程检查，先挂载新窗口再关闭旧窗口。
+- `android/app/src/test/`、`android/app/build.gradle.kts`：仅增加有针对性的 JUnit 测试和测试依赖。
+- 安装本轮构建后需先成功播放过一张 HTTP 图片，才有下次开机的持久兜底；不迁移旧版临时下载缓存。本地文件选择不作为 HTTP 兜底缓存。
+- 回滚方式：恢复本轮修改文件到改动前版本并移除本轮新增 Kotlin 类与测试，恢复“开机只监听、不恢复媒体”；私有持久图片可留存但不再读取。不要直接回退其他既有修改。
+
+## 2026-11-18 - Task: 延迟缓存恢复预发布 v1.3.0-beta.1
+
+### What was done
+
+- 用户确认使用预发布渠道，将应用版本更新为 `1.3.0-beta.1+18`，同步页面和 HTTP 状态中的版本信息。
+- 本次包含开机两分钟无新媒体指令时的本地缓存图片恢复、新图成功后才替换旧图、过时任务保护及 HTTP/解码错误边界。
+- 使用新的次版本号标识向后兼容的缓存恢复能力；已有 HTTP 接口保持兼容，原屏幕选择和悬浮窗功能一并保留。
+- 发布标签计划为 `v1.3.0-beta.1`，由 `Android APK Release` 工作流编译上传 APK，并标记为预发布；正式版最新标签保持不变。
+- 提交范围仅包含应用源码、测试和相关文档，排除本地 `.cursor/`、`.trellis/`、`AGENTS.md`、忽略的工作区笔记及构建产物。
+
+### Testing
+
+- 版本同步后执行 `flutter analyze && flutter test && flutter build apk --release && ./android/gradlew -p android :app:testDebugUnitTest && git diff --check`：全部通过。
+- Flutter 测试 3 项、原生 JVM 测试 30 项通过，release APK 本地构建成功。
+- RK3588 真机重启、两分钟恢复和长期空闲稳定性尚未验证；不将本次发布描述为已确认修复空闲异常退出。
+
+### Notes
+
+- 安装预发布 APK 后先通过 HTTP 成功显示一张图片，再重启验证两分钟后的离线缓存恢复。
+- 回滚使用已发布旧版本 APK；新版本的独立私有缓存无需手动删除，旧版本不会加载它。
+- 远端发布状态以 GitHub Release 页面及 Actions 结果为准。

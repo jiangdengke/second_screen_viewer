@@ -9,7 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -24,7 +27,6 @@ import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
-import java.net.URI
 import java.net.URL
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -38,9 +40,10 @@ class ControlHttpService : Service() {
     companion object {
         const val CONTROL_PORT = 9999
         private const val TAG = "SecondScreenViewer"
-        private const val APP_VERSION_LABEL = "版本 1.2.8-beta.1 (17)"
+        private const val APP_VERSION_LABEL = "版本 1.3.0-beta.1 (18)"
         private const val NOTIFICATION_CHANNEL_ID = "second_screen_control"
         private const val NOTIFICATION_ID = 1001
+        private const val BOOT_EVENT_ELAPSED = "bootEventElapsed"
 
         @Volatile
         private var serverStatus: String = "未启动"
@@ -48,8 +51,9 @@ class ControlHttpService : Service() {
         @Volatile
         private var lastServiceMessage: String? = null
 
-        fun start(context: Context) {
+        fun start(context: Context, bootEventElapsed: Long? = null) {
             val intent = Intent(context, ControlHttpService::class.java)
+            if (bootEventElapsed != null) intent.putExtra(BOOT_EVENT_ELAPSED, bootEventElapsed)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -94,7 +98,22 @@ class ControlHttpService : Service() {
     private var slideshowFuture: ScheduledFuture<*>? = null
     private var serverThread: Thread? = null
     private var serverSocket: ServerSocket? = null
-    private var isSlideshowTicking = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var serviceLease = 0L
+    private var bootDeadline: Long? = null
+    private val bootRestore = object : Runnable {
+        override fun run() {
+            val deadline = bootDeadline ?: return
+            if (MediaFallbackCoordinator.gate.restoreToken(serviceLease) == null) return
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining > 0) {
+                mainHandler.postDelayed(this, remaining)
+            } else {
+                bootDeadline = null
+                MediaFallbackCoordinator.restore(applicationContext, serviceLease, ::handlePresentationEvent)
+            }
+        }
+    }
 
     @Volatile
     private var running = false
@@ -103,26 +122,37 @@ class ControlHttpService : Service() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
+        serviceLease = MediaFallbackCoordinator.gate.attachService { stopImageSlideshow() }
         startHttpServerIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         startHttpServerIfNeeded()
+        val bootEvent = intent?.takeIf { it.hasExtra(BOOT_EVENT_ELAPSED) }
+            ?.getLongExtra(BOOT_EVENT_ELAPSED, -1L)
+        MediaFallbackCoordinator.resume(applicationContext, serviceLease, bootEvent) { record ->
+            mainHandler.removeCallbacks(bootRestore)
+            bootDeadline = record.deadlineElapsed
+            mainHandler.postDelayed(bootRestore, maxOf(0L, record.deadlineElapsed - SystemClock.elapsedRealtime()))
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        MediaFallbackCoordinator.gate.detachService(serviceLease)
+        mainHandler.removeCallbacks(bootRestore)
         serverStatus = "已停止"
-        stopImageSlideshow(clearCache = true)
+        stopImageSlideshow()
+        clientExecutor.execute { pruneRemoteMediaCache() }
         try {
             serverSocket?.close()
         } catch (_: IOException) {
             // Best effort shutdown.
         }
-        clientExecutor.shutdownNow()
-        slideshowExecutor.shutdownNow()
+        clientExecutor.shutdown()
+        slideshowExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -172,33 +202,40 @@ class ControlHttpService : Service() {
     }
 
     private fun handleClient(socket: Socket) {
-        socket.use { client ->
-            try {
-                val request = readHttpRequest(client)
-                if (request == null) {
+        try {
+            socket.use { client ->
+                try {
+                    val request = readHttpRequest(client)
+                    if (request == null) {
+                        writeJsonResponse(
+                            client,
+                            HttpStatus.badRequest,
+                            errorResponse("BAD_REQUEST", "请求格式错误")
+                        )
+                        return
+                    }
+
+                    Log.i(TAG, "HTTP调用：${request.method} ${request.path} from=${request.remoteAddress}")
+                    val response = routeRequest(request)
+                    if (response.statusCode == HttpStatus.noContent) {
+                        writeEmptyResponse(client, response.statusCode)
+                    } else {
+                        writeJsonResponse(client, response.statusCode, response.payload)
+                    }
+                } catch (error: Exception) {
+                    Log.e(TAG, "HTTP request failed", error)
                     writeJsonResponse(
                         client,
                         HttpStatus.badRequest,
-                        errorResponse("BAD_REQUEST", "请求格式错误")
+                        errorResponse("REQUEST_FAILED", error.message ?: error.toString())
                     )
-                    return
                 }
-
-                Log.i(TAG, "HTTP调用：${request.method} ${request.path} from=${request.remoteAddress}")
-                val response = routeRequest(request)
-                if (response.statusCode == HttpStatus.noContent) {
-                    writeEmptyResponse(client, response.statusCode)
-                } else {
-                    writeJsonResponse(client, response.statusCode, response.payload)
-                }
-            } catch (error: Exception) {
-                Log.e(TAG, "HTTP request failed", error)
-                writeJsonResponse(
-                    client,
-                    HttpStatus.badRequest,
-                    errorResponse("REQUEST_FAILED", error.message ?: error.toString())
-                )
             }
+        } catch (error: IOException) {
+            // Includes a failed error response and Socket.close(), outside the inner catch.
+            Log.w(TAG, "HTTP client I/O ended", error)
+        } finally {
+            pruneRemoteMediaCache()
         }
     }
 
@@ -224,9 +261,11 @@ class ControlHttpService : Service() {
             (request.path == "/api/hide" || request.path == "/robot_task/screen_stop")
         ) {
             Log.i(TAG, "HTTP停止调用：${request.path}")
-            stopImageSlideshow(clearCache = true)
-            SecondScreenDisplayController.hideMedia(this)
-            lastServiceMessage = "已停止副屏显示"
+            val token = requireNotNull(request.commandToken)
+            SecondScreenDisplayController.hideMedia(this, token)
+            MediaFallbackCoordinator.gate.runIfCurrent(token) {
+                lastServiceMessage = "已停止副屏显示"
+            }
             return RouteResponse(HttpStatus.ok, successResponse(statusPayload()))
         }
 
@@ -239,8 +278,8 @@ class ControlHttpService : Service() {
 
         val payload = readJsonBody(request.body)
         return when (request.path) {
-            "/robot_task/screen_control" -> handleVideoControlRequest(payload)
-            "/robot_task/screen_control_img_display" -> handleImageControlRequest(payload)
+            "/robot_task/screen_control" -> handleVideoControlRequest(payload, requireNotNull(request.commandToken))
+            "/robot_task/screen_control_img_display" -> handleImageControlRequest(payload, requireNotNull(request.commandToken))
             else -> RouteResponse(
                 HttpStatus.notFound,
                 errorResponse("NOT_FOUND", "未知接口：${request.path}")
@@ -248,13 +287,12 @@ class ControlHttpService : Service() {
         }
     }
 
-    private fun handleVideoControlRequest(payload: JSONObject): RouteResponse {
+    private fun handleVideoControlRequest(payload: JSONObject, token: MediaWorkToken): RouteResponse {
         val url = stringValue(payload.opt("url"))
         if (url.isNullOrEmpty()) {
             throw IllegalArgumentException("缺少 url")
         }
 
-        stopImageSlideshow(clearCache = true)
         val mediaType = stringValue(payload.opt("mediaType")) ?: inferMediaType(url)
         val displayId = intValue(firstPresentValue(payload, "displayId", "display_id"))
         val scaleMode = scaleModeFromPayload(payload)
@@ -265,21 +303,24 @@ class ControlHttpService : Service() {
                 "scale=$scaleMode rotation=$rotationDegrees"
         )
 
-        val resolvedUri = resolveRemoteMediaUriForDisplay(url, mediaType)
-        val showResult = SecondScreenDisplayController.showMedia(
-            this,
-            DisplayMediaRequest(
-                displayId = displayId,
-                mediaUri = resolvedUri,
-                mediaName = fileNameFromUrl(url),
-                sourceUri = url,
-                mediaType = mediaType,
-                scaleMode = scaleMode,
-                rotationDegrees = rotationDegrees,
-            ),
-            ::handlePresentationEvent
+        val resolvedUri = resolveRemoteMediaUriForDisplay(url, mediaType, token)
+        val request = DisplayMediaRequest(
+            displayId = displayId,
+            mediaUri = resolvedUri,
+            mediaName = fileNameFromUrl(url),
+            sourceUri = url,
+            mediaType = mediaType,
+            scaleMode = scaleMode,
+            rotationDegrees = rotationDegrees,
         )
-        lastServiceMessage = "视频显示成功：display=${showResult["displayId"]}"
+        val showResult = if (mediaType == "image" || mediaType.startsWith("image/")) {
+            showHttpImage(request, token)
+        } else {
+            SecondScreenDisplayController.showMedia(this, request, token, ::handlePresentationEvent)
+        }
+        MediaFallbackCoordinator.gate.runIfCurrent(token) {
+            lastServiceMessage = "视频显示成功：display=${showResult["displayId"]}"
+        }
 
         return RouteResponse(
             HttpStatus.ok,
@@ -292,7 +333,7 @@ class ControlHttpService : Service() {
         )
     }
 
-    private fun handleImageControlRequest(payload: JSONObject): RouteResponse {
+    private fun handleImageControlRequest(payload: JSONObject, token: MediaWorkToken): RouteResponse {
         val urls = urlListValue(payload.opt("url"))
         if (urls.isEmpty()) {
             throw IllegalArgumentException("缺少 url 图片列表")
@@ -314,8 +355,11 @@ class ControlHttpService : Service() {
             displayId = displayId,
             scaleMode = scaleMode,
             rotationDegrees = rotationDegrees,
+            token = token,
         )
-        lastServiceMessage = "图片轮播启动：display=$shownDisplayId count=${urls.size}"
+        MediaFallbackCoordinator.gate.runIfCurrent(token) {
+            lastServiceMessage = "图片轮播启动：display=$shownDisplayId count=${urls.size}"
+        }
 
         return RouteResponse(
             HttpStatus.ok,
@@ -335,18 +379,18 @@ class ControlHttpService : Service() {
         displayId: Int?,
         scaleMode: String,
         rotationDegrees: Int,
+        token: MediaWorkToken,
     ): Int {
-        stopImageSlideshow(clearCache = true)
         val normalizedIntervalMs = if (intervalMs < 500) 500 else intervalMs
         var index = 0
 
         fun showNextImage(): Int {
+            if (!MediaFallbackCoordinator.gate.isCurrent(token)) throw ObsoleteMediaWorkException()
             val currentIndex = index % urls.size
             val sourceUrl = urls[currentIndex]
             index += 1
-            val displayUri = resolveRemoteMediaUriForDisplay(sourceUrl, "image")
-            val showResult = SecondScreenDisplayController.showMedia(
-                this,
+            val displayUri = resolveRemoteMediaUriForDisplay(sourceUrl, "image", token)
+            val showResult = showHttpImage(
                 DisplayMediaRequest(
                     displayId = displayId,
                     mediaUri = displayUri,
@@ -356,7 +400,7 @@ class ControlHttpService : Service() {
                     scaleMode = scaleMode,
                     rotationDegrees = rotationDegrees,
                 ),
-                ::handlePresentationEvent
+                token,
             )
             return (showResult["displayId"] as? Number)?.toInt()
                 ?: SecondScreenDisplayController.resolveDisplayId(this, displayId)
@@ -365,61 +409,86 @@ class ControlHttpService : Service() {
 
         val shownDisplayId = showNextImage()
         if (urls.size > 1) {
-            slideshowFuture = slideshowExecutor.scheduleWithFixedDelay(
-                {
-                    if (isSlideshowTicking) {
-                        return@scheduleWithFixedDelay
-                    }
-                    isSlideshowTicking = true
-                    try {
-                        showNextImage()
-                    } catch (error: Exception) {
-                        lastServiceMessage = "图片轮播失败：${error.message ?: error.toString()}"
-                        Log.e(TAG, "Image slideshow failed", error)
-                    } finally {
-                        isSlideshowTicking = false
-                    }
-                },
-                normalizedIntervalMs.toLong(),
-                normalizedIntervalMs.toLong(),
-                TimeUnit.MILLISECONDS
-            )
+            MediaFallbackCoordinator.gate.withCurrent(token) {
+                slideshowFuture = slideshowExecutor.scheduleWithFixedDelay(
+                    {
+                        if (!MediaFallbackCoordinator.gate.isCurrent(token)) {
+                            return@scheduleWithFixedDelay
+                        }
+                        try {
+                            showNextImage()
+                        } catch (error: Exception) {
+                            MediaFallbackCoordinator.gate.runIfCurrent(token) {
+                                lastServiceMessage = "图片轮播失败：${error.message ?: error.toString()}"
+                                Log.e(TAG, "Image slideshow failed", error)
+                            }
+                        } finally {
+                            pruneRemoteMediaCache()
+                        }
+                    },
+                    normalizedIntervalMs.toLong(),
+                    normalizedIntervalMs.toLong(),
+                    TimeUnit.MILLISECONDS
+                )
+            }
             Log.i(TAG, "图片轮播：${urls.size}张 interval=${normalizedIntervalMs}ms")
         }
 
         return shownDisplayId
     }
 
-    private fun stopImageSlideshow(clearCache: Boolean) {
-        slideshowFuture?.cancel(true)
-        slideshowFuture = null
-        isSlideshowTicking = false
-        if (clearCache) {
-            clearRemoteMediaCache()
+    private fun showHttpImage(request: DisplayMediaRequest, token: MediaWorkToken): Map<String, Any?> {
+        val prepared = MediaFallbackCoordinator.prepareImage(applicationContext, request, token)
+        try {
+            val displayRequest = prepared.imageFile?.let {
+                request.copy(mediaUri = Uri.fromFile(it).toString())
+            } ?: request
+            return SecondScreenDisplayController.showPreparedImage(
+                this, displayRequest, prepared, token, onEvent = ::handlePresentationEvent,
+            )
+        } finally {
+            prepared.releaseIfUnadopted()
         }
     }
 
-    private fun clearRemoteMediaCache() {
-        remoteMediaCache.values.forEach { file ->
+    private fun stopImageSlideshow() {
+        synchronized(MediaFallbackCoordinator.gate) {
+            slideshowFuture?.cancel(false)
+            slideshowFuture = null
+        }
+    }
+
+    private fun pruneRemoteMediaCache() {
+        val currentUri = SecondScreenDisplayController.getSavedConfig(this)["mediaUri"]
+        remoteMediaCache.entries.forEach { (key, file) ->
+            val generation = key.substringBefore(':').toLongOrNull()
+            val activeCommand = generation != null && MediaFallbackCoordinator.gate.isCurrent(
+                MediaWorkToken(generation, serviceLease),
+            )
+            if (activeCommand || Uri.fromFile(file).toString() == currentUri) return@forEach
             try {
-                if (file.exists()) {
+                if (remoteMediaCache.remove(key, file)) {
                     file.delete()
                 }
             } catch (_: SecurityException) {
                 // Cache cleanup is best effort.
             }
         }
-        remoteMediaCache.clear()
     }
 
-    private fun resolveRemoteMediaUriForDisplay(sourceUrl: String, mediaType: String): String {
+    private fun resolveRemoteMediaUriForDisplay(
+        sourceUrl: String, mediaType: String, token: MediaWorkToken,
+    ): String {
+        if (!MediaFallbackCoordinator.gate.isCurrent(token)) throw ObsoleteMediaWorkException()
         val uri = Uri.parse(sourceUrl)
         val scheme = uri.scheme?.lowercase(Locale.US)
         if (scheme != "http" && scheme != "https") {
             return sourceUrl
         }
 
-        val cachedFile = remoteMediaCache[sourceUrl]
+        // Generation is part of the key: a late old download never becomes a new command's source.
+        val cacheKey = "${token.generation}:$sourceUrl"
+        val cachedFile = remoteMediaCache[cacheKey]
         if (cachedFile != null && cachedFile.exists()) {
             return Uri.fromFile(cachedFile).toString()
         }
@@ -429,10 +498,7 @@ class ControlHttpService : Service() {
             cacheDirectory.mkdirs()
         }
 
-        val file = File(
-            cacheDirectory,
-            "${System.currentTimeMillis()}_${safeMediaFileName(sourceUrl, mediaType)}"
-        )
+        val file = File.createTempFile("media-", "_${safeMediaFileName(sourceUrl, mediaType)}", cacheDirectory)
         val connection = URL(sourceUrl).openConnection() as HttpURLConnection
         try {
             connection.instanceFollowRedirects = true
@@ -447,7 +513,7 @@ class ControlHttpService : Service() {
                     input.copyTo(output)
                 }
             }
-            remoteMediaCache[sourceUrl] = file
+            MediaFallbackCoordinator.gate.withCurrent(token) { remoteMediaCache[cacheKey] = file }
             Log.i(TAG, "媒体缓存完成：$sourceUrl -> ${file.absolutePath}")
             return Uri.fromFile(file).toString()
         } catch (error: Exception) {
@@ -468,9 +534,6 @@ class ControlHttpService : Service() {
         val type = event["type"]?.toString() ?: "unknown"
         val message = event["message"]?.toString()
         lastServiceMessage = if (message.isNullOrEmpty()) type else "$type：$message"
-        if (type == "presentationDismissed") {
-            stopImageSlideshow(clearCache = true)
-        }
         if (type == "videoError") {
             Log.e(TAG, "Presentation event: $event")
         } else {
@@ -502,6 +565,14 @@ class ControlHttpService : Service() {
         if (requestParts.size < 2) {
             return null
         }
+        val method = requestParts[0].uppercase(Locale.US)
+        val path = MediaCommandRoutes.normalizePath(requestParts[1])
+        val commandToken = if (MediaCommandRoutes.isMediaCommand(method, path)) {
+            val (token, persisted) = MediaFallbackCoordinator.admit(applicationContext, serviceLease)
+            // Admission precedes headers/body, including malformed or stalled recognized requests.
+            persisted.awaitMediaWork()
+            token
+        } else null
 
         var contentLength = 0
         while (true) {
@@ -535,10 +606,11 @@ class ControlHttpService : Service() {
         }
 
         return HttpRequestData(
-            method = requestParts[0].uppercase(Locale.US),
-            path = normalizePath(requestParts[1]),
+            method = method,
+            path = path,
             body = body,
-            remoteAddress = socket.inetAddress?.hostAddress ?: "unknown"
+            remoteAddress = socket.inetAddress?.hostAddress ?: "unknown",
+            commandToken = commandToken,
         )
     }
 
@@ -650,14 +722,6 @@ class ControlHttpService : Service() {
         return mapOf("code" to 400, "msg" to message, "error" to error)
     }
 
-    private fun normalizePath(target: String): String {
-        return try {
-            URI(target).path.lowercase(Locale.US)
-        } catch (_: Exception) {
-            target.substringBefore('?').lowercase(Locale.US)
-        }
-    }
-
     private fun firstPresentValue(payload: JSONObject, vararg names: String): Any? {
         for (name in names) {
             if (payload.has(name)) {
@@ -755,6 +819,7 @@ private data class HttpRequestData(
     val path: String,
     val body: String,
     val remoteAddress: String,
+    val commandToken: MediaWorkToken?,
 )
 
 private data class RouteResponse(

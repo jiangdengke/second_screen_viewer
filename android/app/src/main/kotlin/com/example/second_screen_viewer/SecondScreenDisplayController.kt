@@ -136,66 +136,83 @@ object SecondScreenDisplayController {
             ?: displays.firstOrNull { it.displayId != Display.DEFAULT_DISPLAY }?.displayId
     }
 
-    fun showMedia(
+    internal fun showMedia(
         context: Context,
         request: DisplayMediaRequest,
+        token: MediaWorkToken,
         onEvent: (Map<String, Any?>) -> Unit = {},
-    ): Map<String, Any?> {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return showMediaOnMain(context, request, onEvent)
+    ): Map<String, Any?> = dispatchOnMain {
+        MediaFallbackCoordinator.gate.withCurrent(token) {
+            showMediaOnMain(context, request, token, onEvent)
         }
-
-        val latch = CountDownLatch(1)
-        var response: Map<String, Any?>? = null
-        var thrown: Throwable? = null
-        mainHandler.post {
-            try {
-                response = showMediaOnMain(context, request, onEvent)
-            } catch (error: Throwable) {
-                thrown = error
-            } finally {
-                latch.countDown()
-            }
-        }
-        latch.await()
-        thrown?.let { throw it }
-        return response ?: throw SecondScreenDisplayException("SHOW_FAILED", "副屏显示失败")
     }
 
-    fun hideMedia(context: Context): Boolean {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return hideMediaOnMain(context)
-        }
-
-        val latch = CountDownLatch(1)
-        var response = false
-        mainHandler.post {
-            try {
-                response = hideMediaOnMain(context)
-            } finally {
-                latch.countDown()
+    internal fun showPreparedImage(
+        context: Context,
+        request: DisplayMediaRequest,
+        prepared: PreparedDisplayImage,
+        token: MediaWorkToken,
+        strictDisplay: Boolean = false,
+        publishLastGood: Boolean = true,
+        onEvent: (Map<String, Any?>) -> Unit = {},
+    ): Map<String, Any?> = dispatchOnMain {
+        MediaFallbackCoordinator.gate.withCurrent(token) {
+            showMediaOnMain(context, request, token, onEvent, prepared, strictDisplay).also { config ->
+                if (publishLastGood) MediaFallbackCoordinator.imageAttached(context, prepared, config)
             }
         }
-        latch.await()
-        return response
+    }
+
+    internal fun hideMedia(context: Context, token: MediaWorkToken): Boolean = dispatchOnMain {
+        MediaFallbackCoordinator.gate.withCurrent(token) { hideMediaOnMain(context) }
+    }
+
+    private fun <Result> dispatchOnMain(operation: () -> Result): Result {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return operation()
+        }
+        val latch = CountDownLatch(1)
+        var response: kotlin.Result<Result>? = null
+        val posted = mainHandler.post {
+            response = runCatching(operation)
+            latch.countDown()
+        }
+        if (!posted) {
+            throw SecondScreenDisplayException("DISPLAY_UNAVAILABLE", "Display thread is unavailable")
+        }
+        // Cancellation revokes the token, not bitmap ownership while a main runnable still uses it.
+        var interrupted = false
+        while (true) {
+            try {
+                latch.await()
+                break
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
+        return checkNotNull(response).getOrThrow()
     }
 
     private fun showMediaOnMain(
         context: Context,
         request: DisplayMediaRequest,
+        token: MediaWorkToken,
         onEvent: (Map<String, Any?>) -> Unit,
+        prepared: PreparedDisplayImage? = null,
+        strictDisplay: Boolean = false,
     ): Map<String, Any?> {
         val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         val mediaUriString = request.mediaUri
         val mediaName = request.mediaName
         val sourceUriString = request.sourceUri ?: mediaUriString
         val scaleMode = (request.scaleMode ?: "centerCrop").toImageScaleMode()
-        val rotationDegrees = request.rotationDegrees
+        val rotationDegrees = request.rotationDegrees.normalizedRightAngle()
         val mediaType = (
             request.mediaType
                 ?: contentTypeForUri(context, mediaUriString).toMediaType()
             ).toMediaType()
-        val displayId = resolveDisplayId(context, request.displayId)
+        val displayId = if (strictDisplay) request.displayId else resolveDisplayId(context, request.displayId)
 
         if (displayId == null) {
             throw SecondScreenDisplayException("NO_DISPLAY", "请选择目标屏幕")
@@ -210,7 +227,11 @@ object SecondScreenDisplayController {
             throw SecondScreenDisplayException("DISPLAY_NOT_FOUND", "找不到 Display $displayId")
         }
 
-        val mediaWindow = createMediaWindow(
+        val onCurrentEvent: (Map<String, Any?>) -> Unit = { event ->
+            MediaFallbackCoordinator.gate.runIfCurrent(token) { onEvent(event) }
+        }
+        lateinit var mediaWindow: SecondScreenMediaWindow
+        mediaWindow = createMediaWindow(
             context,
             display,
             MediaViewSpec(
@@ -219,39 +240,31 @@ object SecondScreenDisplayController {
                 scaleMode,
                 rotationDegrees,
                 displayId,
-                onEvent
+                onCurrentEvent,
+                prepared,
+                onCloseRequested = { requestWindowDismissal(context, mediaWindow, onEvent) },
             )
         )
         mediaWindow.setOnDismissed {
             if (currentMediaWindow === mediaWindow) {
                 currentMediaWindow = null
                 currentMediaConfig = null
-                onEvent(mapOf("type" to "presentationDismissed", "displayId" to displayId))
+                // A superseded window can disappear while a newer request is still preparing.
+                MediaFallbackCoordinator.gate.runIfCurrent(token) {
+                    MediaFallbackCoordinator.admitLocal(context) { dismissalToken ->
+                        MediaFallbackCoordinator.gate.runIfCurrent(dismissalToken) {
+                            onEvent(mapOf("type" to "presentationDismissed", "displayId" to displayId))
+                        }
+                    }
+                }
             }
         }
 
         try {
-            val previousMediaWindow = currentMediaWindow
-            currentMediaWindow = null
-            currentMediaConfig = null
-            previousMediaWindow?.dismiss()
             mediaWindow.show()
-            currentMediaWindow = mediaWindow
-
-            val mediaConfig = mapOf(
-                "displayId" to displayId,
-                "imageUri" to mediaUriString,
-                "mediaUri" to mediaUriString,
-                "mediaType" to mediaType,
-                "mediaName" to mediaName,
-                "sourceUri" to sourceUriString,
-                "scaleMode" to scaleMode,
-                "rotationDegrees" to rotationDegrees,
-                "isShowing" to true
-            )
-            currentMediaConfig = mediaConfig
-            return mediaConfig
+            prepared?.adopt()
         } catch (error: WindowManager.InvalidDisplayException) {
+            runCatching { mediaWindow.dismiss() }
             Log.e(TAG, "Invalid display for presentation", error)
             throw SecondScreenDisplayException(
                 "INVALID_DISPLAY",
@@ -259,6 +272,7 @@ object SecondScreenDisplayController {
                 buildErrorDetails(error, display, mediaUriString, mediaType, scaleMode, rotationDegrees)
             )
         } catch (error: SecurityException) {
+            runCatching { mediaWindow.dismiss() }
             Log.e(TAG, "Media permission error", error)
             throw SecondScreenDisplayException(
                 "IMAGE_PERMISSION",
@@ -266,12 +280,55 @@ object SecondScreenDisplayController {
                 buildErrorDetails(error, display, mediaUriString, mediaType, scaleMode, rotationDegrees)
             )
         } catch (error: Exception) {
+            runCatching { mediaWindow.dismiss() }
             Log.e(TAG, "Failed to show presentation", error)
             throw SecondScreenDisplayException(
                 "SHOW_FAILED",
                 "副屏显示失败",
                 buildErrorDetails(error, display, mediaUriString, mediaType, scaleMode, rotationDegrees)
             )
+        }
+        val previousMediaWindow = currentMediaWindow
+        currentMediaWindow = mediaWindow
+        val mediaConfig = mapOf(
+            "displayId" to displayId,
+            "imageUri" to mediaUriString,
+            "mediaUri" to mediaUriString,
+            "mediaType" to mediaType,
+            "mediaName" to mediaName,
+            "sourceUri" to sourceUriString,
+            "scaleMode" to scaleMode,
+            "rotationDegrees" to rotationDegrees,
+            "isShowing" to true
+        )
+        currentMediaConfig = mediaConfig
+        runCatching { previousMediaWindow?.dismiss() }.onFailure {
+            Log.w(TAG, "Previous media window cleanup failed", it)
+        }
+        if (mediaType == "image") {
+            runCatching {
+                onCurrentEvent(mapOf("type" to "imageShown", "displayId" to displayId, "uri" to mediaUriString))
+            }.onFailure { Log.w(TAG, "Image event callback failed", it) }
+        }
+        return mediaConfig
+    }
+
+    private fun requestWindowDismissal(
+        context: Context,
+        mediaWindow: SecondScreenMediaWindow,
+        onEvent: (Map<String, Any?>) -> Unit,
+    ) {
+        if (currentMediaWindow !== mediaWindow) return
+        MediaFallbackCoordinator.admitLocal(context) { token ->
+            runCatching {
+                MediaFallbackCoordinator.gate.runIfCurrent(token) {
+                    if (currentMediaWindow === mediaWindow) {
+                        val displayId = currentMediaConfig?.get("displayId")
+                        hideMediaOnMain(context)
+                        onEvent(mapOf("type" to "presentationDismissed", "displayId" to displayId))
+                    }
+                }
+            }.onFailure { Log.w(TAG, "Media window dismissal failed", it) }
         }
     }
 
@@ -365,6 +422,8 @@ private class MediaViewSpec(
     val rotationDegrees: Int,
     val displayId: Int,
     val onEvent: (Map<String, Any?>) -> Unit,
+    val prepared: PreparedDisplayImage?,
+    val onCloseRequested: () -> Unit,
 ) {
     fun createRootView(context: Context): FrameLayout {
         return FrameLayout(context).apply {
@@ -385,17 +444,8 @@ private class MediaViewSpec(
                     )
                 )
             } else {
-                onEvent(
-                    mapOf(
-                        "type" to "imageShown",
-                        "mediaType" to mediaType,
-                        "displayId" to displayId,
-                        "uri" to mediaUri.toString(),
-                        "message" to "图片窗口已显示"
-                    )
-                )
                 addView(
-                    SecondScreenImageView(context, mediaUri, scaleMode, rotationDegrees),
+                    SecondScreenImageView(context, mediaUri, scaleMode, rotationDegrees, prepared),
                     FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
@@ -418,15 +468,15 @@ private class SecondScreenMediaOverlay(
     private val windowContext = createOverlayContext(context, display)
     private val windowManager = windowContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val handler = Handler(Looper.getMainLooper())
-    private val closeRunnable = Runnable { dismiss() }
+    private val closeRunnable = Runnable { spec.onCloseRequested() }
     private var rootView: View? = null
     private var onDismissed: (() -> Unit)? = null
 
     override fun show() {
         val root = spec.createRootView(windowContext)
         closeOnLongPress(root)
-        windowManager.addView(root, overlayLayoutParams())
         rootView = root
+        windowManager.addView(root, overlayLayoutParams())
     }
 
     override fun dismiss() {
@@ -732,10 +782,11 @@ private class SecondScreenImageView(
     private val imageUri: Uri,
     private val scaleMode: String,
     rotationDegrees: Int,
+    private val prepared: PreparedDisplayImage?,
 ) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val rotationDegrees = rotationDegrees.normalizedRightAngle()
-    private var bitmap: Bitmap? = null
+    private var bitmap: Bitmap? = prepared?.bitmap
 
     init {
         setBackgroundColor(Color.BLACK)
@@ -743,7 +794,7 @@ private class SecondScreenImageView(
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
-        if (width > 0 && height > 0 && bitmap == null) {
+        if (prepared == null && width > 0 && height > 0 && bitmap == null) {
             bitmap = decodeBitmap(width, height)
         }
     }
@@ -751,7 +802,7 @@ private class SecondScreenImageView(
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(Color.BLACK)
 
-        val currentBitmap = bitmap ?: decodeBitmap(width, height)?.also {
+        val currentBitmap = bitmap ?: (if (prepared == null) decodeBitmap(width, height) else null)?.also {
             bitmap = it
         } ?: return
 
@@ -774,7 +825,7 @@ private class SecondScreenImageView(
     }
 
     override fun onDetachedFromWindow() {
-        bitmap?.recycle()
+        if (prepared != null) prepared.release() else bitmap?.recycle()
         bitmap = null
         super.onDetachedFromWindow()
     }

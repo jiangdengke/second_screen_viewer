@@ -143,6 +143,16 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun showMedia(call: MethodCall, result: MethodChannel.Result) {
+        MediaFallbackCoordinator.admitLocal(applicationContext) { token ->
+            if (isDestroyed) {
+                result.error("ACTIVITY_DESTROYED", "主界面已关闭", null)
+            } else {
+                showAdmittedMedia(call, result, token)
+            }
+        }
+    }
+
+    private fun showAdmittedMedia(call: MethodCall, result: MethodChannel.Result, token: MediaWorkToken) {
         val args = call.arguments as? Map<*, *>
         val displayId = args?.get("displayId").asInt()
         val mediaUriString = args?.get("imageUri") as? String
@@ -166,6 +176,7 @@ class MainActivity : FlutterActivity() {
                     scaleMode = scaleMode,
                     rotationDegrees = rotationDegrees,
                 ),
+                token,
                 ::sendPresentationEvent
             )
             result.success(response)
@@ -197,8 +208,14 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun hideImage(result: MethodChannel.Result) {
-        SecondScreenDisplayController.hideMedia(applicationContext)
-        result.success(true)
+        MediaFallbackCoordinator.admitLocal(applicationContext) { token ->
+            try {
+                SecondScreenDisplayController.hideMedia(applicationContext, token)
+                result.success(true)
+            } catch (error: Exception) {
+                result.error("HIDE_FAILED", "停止操作被更新的指令替代", error.message)
+            }
+        }
     }
 
     private fun sendPresentationEvent(event: Map<String, Any?>) {
